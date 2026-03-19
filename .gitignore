@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+*.spec
+
+hd2_patch_fixer/build/
+hd2_patch_fixer/dist/
+hd2_patch_fixer/smoke_*/
+
+patch/
+patch fix test/
+sdk/
+
+.pytest_cache/
+.mypy_cache/

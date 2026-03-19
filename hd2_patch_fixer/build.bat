@@ -14,15 +14,16 @@ if exist dist rmdir /s /q dist
 python -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  --onefile ^
+  --onedir ^
   --windowed ^
   --name HD2PatchFixer ^
-  --collect-all lz4 ^
+  --version-file build_version_info.txt ^
+  --hidden-import lz4.block ^
   src\main.py
 if errorlevel 1 goto :error
 
 echo.
-echo Build complete. EXE is in dist\HD2PatchFixer.exe
+echo Build complete. EXE is in dist\HD2PatchFixer\HD2PatchFixer.exe
 pause
 exit /b 0
 

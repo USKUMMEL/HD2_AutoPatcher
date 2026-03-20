@@ -1,6 +1,7 @@
 import queue
 import threading
 import tkinter as tk
+from math import ceil
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -9,7 +10,31 @@ from .archive import (
     create_fixed_patch,
     normalize_archive_selection,
 )
-from .constants import TYPE_LABELS
+from .constants import (
+    ParticleID,
+    TYPE_LABELS,
+    WwiseBankID,
+    WwiseDepID,
+    WwiseMetaDataID,
+    WwiseStreamID,
+)
+
+
+BG_APP = "#eef1f4"
+BG_PANEL = "#f7f8fa"
+BG_INPUT = "#ffffff"
+FG_MAIN = "#1f2933"
+FG_MUTED = "#5b6875"
+ACCENT = "#7d8b99"
+ACCENT_HOVER = "#6f7c89"
+BORDER = "#d8dde3"
+DEFAULT_UNCHECKED_TYPE_IDS = {
+    ParticleID,
+    WwiseBankID,
+    WwiseDepID,
+    WwiseStreamID,
+    WwiseMetaDataID,
+}
 
 
 class PatchFixerApp:
@@ -17,7 +42,8 @@ class PatchFixerApp:
         self.root = root
         self.root.title("HD2 Patch Fixer")
         self.root.geometry("920x760")
-        self.root.minsize(820, 680)
+        self.root.minsize(820, 660)
+        self.root.configure(bg=BG_APP)
 
         self.game_path_var = tk.StringVar()
         self.patch_path_var = tk.StringVar()
@@ -29,40 +55,134 @@ class PatchFixerApp:
         self.status_var = tk.StringVar(value="Ready")
 
         self.type_vars = {
-            type_id: tk.BooleanVar(value=True)
+            type_id: tk.BooleanVar(value=type_id not in DEFAULT_UNCHECKED_TYPE_IDS)
             for type_id, _label in TYPE_LABELS
         }
 
         self.log_queue = queue.Queue()
         self.is_running = False
-        self.fix_button = None
-        self.mode_notebook = None
-        self.single_tab = None
-        self.compressed_tab = None
 
+        self._configure_style()
         self._build_layout()
         self._poll_logs()
 
+    def _configure_style(self):
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        style.configure(".", background=BG_APP, foreground=FG_MAIN)
+        style.configure("Root.TFrame", background=BG_APP)
+        style.configure("Card.TFrame", background=BG_PANEL, relief="flat")
+        style.configure(
+            "Title.TLabel",
+            background=BG_APP,
+            foreground=FG_MAIN,
+            font=("Segoe UI", 18, "bold"),
+        )
+        style.configure(
+            "Body.TLabel",
+            background=BG_APP,
+            foreground=FG_MUTED,
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "Section.TLabel",
+            background=BG_PANEL,
+            foreground=FG_MAIN,
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.configure(
+            "TLabelframe",
+            background=BG_PANEL,
+            bordercolor=BORDER,
+            relief="solid",
+            borderwidth=1,
+            padding=12,
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background=BG_PANEL,
+            foreground=FG_MAIN,
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.configure(
+            "TNotebook",
+            background=BG_APP,
+            borderwidth=0,
+            tabmargins=(0, 0, 0, 0),
+        )
+        style.configure(
+            "TNotebook.Tab",
+            background="#dde3e8",
+            foreground=FG_MAIN,
+            padding=(16, 8),
+            font=("Segoe UI", 10, "bold"),
+            borderwidth=0,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", BG_PANEL), ("active", "#e6eaee")],
+        )
+        style.configure(
+            "TButton",
+            background=ACCENT,
+            foreground="#ffffff",
+            borderwidth=0,
+            focusthickness=0,
+            padding=(14, 8),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "TButton",
+            background=[("active", ACCENT_HOVER), ("disabled", "#bcc6cf")],
+            foreground=[("disabled", "#f5f7f9")],
+        )
+        style.configure(
+            "Secondary.TButton",
+            background="#cfd6dd",
+            foreground=FG_MAIN,
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("active", "#c3cbd3"), ("disabled", "#dde3e8")],
+            foreground=[("disabled", "#7f8a94")],
+        )
+        style.configure(
+            "TCheckbutton",
+            background=BG_PANEL,
+            foreground=FG_MAIN,
+            font=("Segoe UI", 10),
+        )
+        style.map("TCheckbutton", background=[("active", BG_PANEL)])
+        style.configure(
+            "TEntry",
+            fieldbackground=BG_INPUT,
+            foreground=FG_MAIN,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+            padding=7,
+        )
+
     def _build_layout(self):
-        container = ttk.Frame(self.root, padding=12)
+        container = ttk.Frame(self.root, style="Root.TFrame", padding=18)
         container.pack(fill="both", expand=True)
 
-        header = ttk.Label(
-            container,
-            text="Fix broken Helldivers 2 patch files and compressed mod packages",
-            font=("Segoe UI", 11, "bold"),
-        )
-        header.pack(anchor="w", pady=(0, 10))
+        header = ttk.Label(container, text="HD2 Patch Fixer", style="Title.TLabel")
+        header.pack(anchor="w")
 
         desc = ttk.Label(
             container,
             text=(
-                "Choose the game data folder, then either fix one patch directly or import a "
-                "compressed mod archive and rebuild every patch inside it."
+                "Fix one patch directly or import a compressed mod package and rebuild "
+                "every patch inside it."
             ),
+            style="Body.TLabel",
             wraplength=880,
+            justify="left",
         )
-        desc.pack(anchor="w", pady=(0, 12))
+        desc.pack(anchor="w", pady=(4, 14))
 
         self._build_path_picker(
             container,
@@ -72,108 +192,177 @@ class PatchFixerApp:
         )
 
         self.mode_notebook = ttk.Notebook(container)
-        self.mode_notebook.pack(fill="x", pady=(8, 12))
+        self.mode_notebook.pack(fill="x", pady=(10, 14))
 
-        self.single_tab = ttk.Frame(self.mode_notebook, padding=10)
-        self.compressed_tab = ttk.Frame(self.mode_notebook, padding=10)
+        self.single_tab = ttk.Frame(self.mode_notebook, style="Card.TFrame", padding=14)
+        self.compressed_tab = ttk.Frame(self.mode_notebook, style="Card.TFrame", padding=14)
         self.mode_notebook.add(self.single_tab, text="Single Patch")
         self.mode_notebook.add(self.compressed_tab, text="Compressed Mods")
 
+        self._build_single_patch_tab()
+        self._build_compressed_mods_tab()
+
+        self._build_actions(container)
+        self._build_type_options(container)
+        self._build_log(container)
+
+    def _build_single_patch_tab(self):
         self._build_path_picker(
             self.single_tab,
             "Broken Patch File",
             self.patch_path_var,
             lambda: self._choose_patch_file(self.patch_path_var),
+            card_style=True,
         )
         self._build_path_picker(
             self.single_tab,
             "Export Folder",
             self.patch_export_path_var,
             lambda: self._choose_directory(self.patch_export_path_var),
+            card_style=True,
         )
 
+        hint = ttk.Label(
+            self.single_tab,
+            text=(
+                "You can select the base patch, .stream, or .gpu_resources file. "
+                "The tool will normalize it automatically."
+            ),
+            style="Body.TLabel",
+            wraplength=820,
+            justify="left",
+        )
+        hint.pack(anchor="w", pady=(8, 0))
+
+    def _build_compressed_mods_tab(self):
         self._build_path_picker(
             self.compressed_tab,
             "Compressed Mod File",
             self.mod_archive_path_var,
-            lambda: self._choose_mod_archive_file(self.mod_archive_path_var),
+            lambda: self._choose_mod_archive_file(),
+            card_style=True,
         )
         self._build_path_picker(
             self.compressed_tab,
             "Export Zip File",
             self.mod_export_zip_var,
             self._choose_export_zip_file,
+            card_style=True,
         )
 
-        archive_help = ttk.Label(
+        hint = ttk.Label(
             self.compressed_tab,
             text=(
-                "Supported input formats: .zip, .7z, .rar. The output is always a .zip with the "
-                "same folder layout and manifest files preserved."
+                "Supported input formats: .zip, .7z, .rar. Output is always a .zip with "
+                "manifest.json and folder layout preserved."
             ),
-            wraplength=840,
+            style="Body.TLabel",
+            wraplength=820,
+            justify="left",
         )
-        archive_help.pack(anchor="w", pady=(4, 0))
+        hint.pack(anchor="w", pady=(8, 0))
 
-        options_frame = ttk.LabelFrame(container, text="Data Types To Keep", padding=10)
-        options_frame.pack(fill="x", pady=(0, 12))
+    def _build_type_options(self, parent):
+        options_frame = ttk.LabelFrame(parent, text="Data Types To Keep")
+        options_frame.pack(fill="x", pady=(0, 14))
 
-        buttons_row = ttk.Frame(options_frame)
+        buttons_row = ttk.Frame(options_frame, style="Card.TFrame")
         buttons_row.pack(fill="x", pady=(0, 8))
 
-        ttk.Button(buttons_row, text="Select All", command=lambda: self._set_all_types(True)).pack(
-            side="left"
-        )
-        ttk.Button(buttons_row, text="Clear All", command=lambda: self._set_all_types(False)).pack(
-            side="left",
-            padx=(8, 0),
-        )
+        ttk.Button(
+            buttons_row,
+            text="Select All",
+            command=lambda: self._set_all_types(True),
+        ).pack(side="left")
+        ttk.Button(
+            buttons_row,
+            text="Clear All",
+            style="Secondary.TButton",
+            command=lambda: self._set_all_types(False),
+        ).pack(side="left", padx=(8, 0))
+
         ttk.Checkbutton(
             buttons_row,
             text="Keep Unknown Types",
             variable=self.keep_unknown_var,
         ).pack(side="right")
+
         ttk.Checkbutton(
             options_frame,
             text="Fallback raw copy for unsupported types (recommended for Unit mods)",
             variable=self.raw_fallback_var,
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 10))
 
-        grid = ttk.Frame(options_frame)
-        grid.pack(fill="x")
+        grid = ttk.Frame(options_frame, style="Card.TFrame")
+        grid.pack(fill="x", pady=(0, 8))
 
+        rows = 3
+        columns = ceil(len(TYPE_LABELS) / rows)
         for index, (type_id, label) in enumerate(TYPE_LABELS):
-            row = index // 2
-            col = index % 2
+            row = index % rows
+            col = index // rows
             check = ttk.Checkbutton(grid, text=label, variable=self.type_vars[type_id])
-            check.grid(row=row, column=col, sticky="w", padx=(0, 24), pady=4)
+            check.grid(row=row, column=col, sticky="w", padx=(0, 24), pady=(2, 2))
 
-        actions = ttk.Frame(container)
-        actions.pack(fill="x", pady=(0, 12))
+        for col in range(columns):
+            grid.columnconfigure(col, weight=1)
 
-        self.fix_button = ttk.Button(actions, text="Fix", command=self._start_fix)
+    def _build_actions(self, parent):
+        actions = ttk.Frame(parent, style="Root.TFrame")
+        actions.pack(fill="x", pady=(0, 14))
+
+        inner = ttk.Frame(actions, style="Root.TFrame")
+        inner.pack(anchor="center")
+
+        self.fix_button = ttk.Button(inner, text="Fix", command=self._start_fix)
         self.fix_button.pack(side="left")
 
-        ttk.Label(actions, textvariable=self.status_var).pack(side="left", padx=(12, 0))
+        status = ttk.Label(inner, textvariable=self.status_var, style="Body.TLabel")
+        status.pack(side="left", padx=(12, 0))
 
-        log_frame = ttk.LabelFrame(container, text="Log", padding=8)
+    def _build_log(self, parent):
+        log_frame = ttk.LabelFrame(parent, text="Log")
         log_frame.pack(fill="both", expand=True)
 
-        self.log_text = tk.Text(log_frame, height=18, wrap="word", state="disabled")
+        text_wrap = ttk.Frame(log_frame, style="Card.TFrame")
+        text_wrap.pack(fill="both", expand=True)
+
+        self.log_text = tk.Text(
+            text_wrap,
+            height=10,
+            wrap="word",
+            state="disabled",
+            bg=BG_INPUT,
+            fg=FG_MAIN,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=BORDER,
+            insertbackground=FG_MAIN,
+            font=("Consolas", 10),
+            padx=10,
+            pady=10,
+        )
         self.log_text.pack(side="left", fill="both", expand=True)
 
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        scrollbar = ttk.Scrollbar(text_wrap, orient="vertical", command=self.log_text.yview)
         scrollbar.pack(side="right", fill="y")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
-    def _build_path_picker(self, parent, label, variable, browse_command):
-        frame = ttk.LabelFrame(parent, text=label, padding=8)
+    def _build_path_picker(self, parent, label, variable, browse_command, card_style=False):
+        frame_parent = parent
+        style = "Card.TFrame" if card_style else "Root.TFrame"
+
+        frame = ttk.LabelFrame(frame_parent, text=label)
         frame.pack(fill="x", pady=4)
 
-        entry = ttk.Entry(frame, textvariable=variable)
+        row = ttk.Frame(frame, style=style)
+        row.pack(fill="x")
+
+        entry = ttk.Entry(row, textvariable=variable)
         entry.pack(side="left", fill="x", expand=True)
 
-        ttk.Button(frame, text="Browse", command=browse_command).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Browse", command=browse_command).pack(side="left", padx=(8, 0))
 
     def _choose_directory(self, variable):
         selected = filedialog.askdirectory()
@@ -188,7 +377,7 @@ class PatchFixerApp:
         if selected:
             variable.set(normalize_archive_selection(selected))
 
-    def _choose_mod_archive_file(self, variable):
+    def _choose_mod_archive_file(self):
         selected = filedialog.askopenfilename(
             title="Select compressed mod archive",
             filetypes=[
@@ -197,11 +386,10 @@ class PatchFixerApp:
             ],
         )
         if selected:
-            variable.set(selected)
+            self.mod_archive_path_var.set(selected)
             if not self.mod_export_zip_var.get().strip():
                 default_name = f"{Path(selected).stem}_fixed.zip"
-                variable_parent = Path(selected).parent
-                self.mod_export_zip_var.set(str(variable_parent / default_name))
+                self.mod_export_zip_var.set(str(Path(selected).parent / default_name))
 
     def _choose_export_zip_file(self):
         initial_file = self.mod_export_zip_var.get().strip() or "fixed_mod.zip"
@@ -267,7 +455,7 @@ class PatchFixerApp:
         )
 
     def _current_mode(self):
-        return "compressed_mods" if self.mode_notebook.select() == str(self.compressed_tab) else "single_patch"
+        return "compressed_mods" if self.mode_notebook.index("current") == 1 else "single_patch"
 
     def _collect_keep_type_ids(self):
         keep_type_ids = {
@@ -328,10 +516,11 @@ class PatchFixerApp:
         self.fix_button.configure(state="disabled")
         self.status_var.set("Running")
         self._append_log("")
-        if job["mode"] == "single_patch":
-            self._append_log("Starting single patch fix operation...")
-        else:
-            self._append_log("Starting compressed mod fix operation...")
+        self._append_log(
+            "Starting single patch fix operation..."
+            if job["mode"] == "single_patch"
+            else "Starting compressed mod fix operation..."
+        )
 
         thread = threading.Thread(
             target=self._run_fix,
@@ -371,8 +560,5 @@ class PatchFixerApp:
 
 def run():
     root = tk.Tk()
-    style = ttk.Style(root)
-    if "vista" in style.theme_names():
-        style.theme_use("vista")
     PatchFixerApp(root)
     root.mainloop()

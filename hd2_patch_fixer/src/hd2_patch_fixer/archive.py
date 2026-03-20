@@ -1,9 +1,13 @@
 import copy
 import os
+import shutil
 import struct
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
+import zipfile
 
 from .constants import (
     BaseArchiveHexID,
@@ -339,10 +343,85 @@ def build_patch_template(default_archive: StreamToc, output_path: str):
     return patch
 
 
-def ensure_base_file_path(selected_patch_path: str):
-    lower_path = selected_patch_path.lower()
-    if lower_path.endswith(".gpu_resources") or lower_path.endswith(".stream"):
-        raise ValueError("Please select the base patch file, not the .gpu_resources or .stream file.")
+def normalize_archive_selection(selected_path: str):
+    lower_path = selected_path.lower()
+    for suffix in (".gpu_resources", ".stream"):
+        if lower_path.endswith(suffix):
+            return selected_path[: -len(suffix)]
+    return selected_path
+
+
+def find_7z_executable():
+    for candidate in (
+        shutil.which("7z"),
+        shutil.which("7zz"),
+        r"C:\Windows\System32\7z.exe",
+        r"C:\Program Files\7-Zip\7z.exe",
+    ):
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    return None
+
+
+def extract_archive_file(input_archive_path: str, extract_dir: str):
+    suffix = Path(input_archive_path).suffix.lower()
+    if suffix == ".zip":
+        with zipfile.ZipFile(input_archive_path, "r") as archive_file:
+            archive_file.extractall(extract_dir)
+        return
+
+    if suffix not in {".7z", ".rar"}:
+        raise ValueError("Unsupported archive format. Please choose a .zip, .7z, or .rar file.")
+
+    tool_path = find_7z_executable()
+    if tool_path is None:
+        raise ValueError("7-Zip is required to open .7z or .rar files, but 7z.exe was not found.")
+
+    result = subprocess.run(
+        [tool_path, "x", "-y", f"-o{extract_dir}", input_archive_path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = result.stderr.strip() or result.stdout.strip() or "Unknown extraction error."
+        raise ValueError(f"Failed to extract compressed mod archive.\n{details}")
+
+
+def create_zip_from_directory(source_dir: str, output_zip_path: str):
+    source_path = Path(source_dir)
+    output_path = Path(output_zip_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
+        for file_path in sorted(source_path.rglob("*")):
+            if file_path.is_file():
+                archive_file.write(file_path, arcname=file_path.relative_to(source_path))
+
+
+def find_patch_groups(root_dir: str):
+    grouped_paths = {}
+    for file_path in Path(root_dir).rglob("*"):
+        if not file_path.is_file():
+            continue
+        normalized_path = Path(normalize_archive_selection(str(file_path)))
+        if ".patch_" not in normalized_path.name:
+            continue
+        grouped_paths.setdefault(normalized_path, set()).add(file_path)
+
+    patch_paths = []
+    incomplete_groups = []
+    for normalized_path, members in sorted(grouped_paths.items(), key=lambda item: str(item[0]).lower()):
+        if normalized_path.is_file():
+            patch_paths.append(str(normalized_path))
+        else:
+            incomplete_groups.append(
+                {
+                    "base_path": str(normalized_path),
+                    "members": sorted(str(member) for member in members),
+                }
+            )
+    return patch_paths, incomplete_groups
 
 
 def resolve_output_path(export_dir: str, patch_index: int = 0):
@@ -608,9 +687,10 @@ def create_fixed_patch(
     keep_unknown_types: bool = True,
     raw_fallback_for_unsupported: bool = False,
     auto_include_unit_dependencies: bool = True,
+    output_patch_path: str | None = None,
     log=None,
 ):
-    ensure_base_file_path(broken_patch_path)
+    broken_patch_path = normalize_archive_selection(broken_patch_path)
     if not Path(game_data_folder).is_dir():
         raise ValueError("Game data folder is invalid.")
     if not Path(broken_patch_path).is_file():
@@ -633,7 +713,7 @@ def create_fixed_patch(
         raise ValueError("Failed to load the selected broken patch.")
 
     patch_index = detect_patch_index_from_name(broken_patch_path)
-    output_path = resolve_output_path(export_dir, patch_index)
+    output_path = output_patch_path or resolve_output_path(export_dir, patch_index)
     fixed_patch = build_patch_template(default_archive, output_path)
 
     kept_entries = 0
@@ -699,4 +779,72 @@ def create_fixed_patch(
         "copied_counts": copied_counts,
         "source_counts": broken_patch.entry_counts(),
         "dependency_issues_resolved_or_seen": dependency_issues,
+    }
+
+
+def create_fixed_mod_archive(
+    game_data_folder: str,
+    input_archive_path: str,
+    output_zip_path: str,
+    keep_type_ids: set[int],
+    keep_unknown_types: bool = True,
+    raw_fallback_for_unsupported: bool = False,
+    auto_include_unit_dependencies: bool = True,
+    log=None,
+):
+    if not Path(game_data_folder).is_dir():
+        raise ValueError("Game data folder is invalid.")
+    if not Path(input_archive_path).is_file():
+        raise ValueError("Compressed mod file does not exist.")
+    if Path(output_zip_path).suffix.lower() != ".zip":
+        raise ValueError("Export file must be a .zip file.")
+
+    with tempfile.TemporaryDirectory(prefix="hd2_patch_fixer_") as temp_dir:
+        extract_dir = str(Path(temp_dir) / "mod")
+        Path(extract_dir).mkdir(parents=True, exist_ok=True)
+
+        log_message(log, f"Extracting compressed mod: {input_archive_path}")
+        extract_archive_file(input_archive_path, extract_dir)
+
+        patch_paths, incomplete_groups = find_patch_groups(extract_dir)
+        for group in incomplete_groups:
+            log_message(log, f"SKIP incomplete patch group without base file: {group['base_path']}")
+
+        if not patch_paths:
+            raise ValueError("No patch files were found inside the compressed mod archive.")
+
+        fixed_patch_results = []
+        log_message(log, f"Found {len(patch_paths)} patch file(s) inside compressed mod archive.")
+
+        for patch_path in patch_paths:
+            relative_path = Path(patch_path).relative_to(extract_dir)
+            log_message(log, f"Fixing patch inside archive: {relative_path}")
+            result = create_fixed_patch(
+                game_data_folder=game_data_folder,
+                broken_patch_path=patch_path,
+                export_dir=str(Path(patch_path).parent),
+                keep_type_ids=keep_type_ids,
+                keep_unknown_types=keep_unknown_types,
+                raw_fallback_for_unsupported=raw_fallback_for_unsupported,
+                auto_include_unit_dependencies=auto_include_unit_dependencies,
+                output_patch_path=patch_path,
+                log=log,
+            )
+            fixed_patch_results.append(
+                {
+                    "relative_path": str(relative_path).replace("\\", "/"),
+                    "output_path": result["output_path"],
+                    "kept_entries": result["kept_entries"],
+                    "skipped_entries": result["skipped_entries"],
+                }
+            )
+
+        log_message(log, f"Creating fixed compressed mod zip: {output_zip_path}")
+        create_zip_from_directory(extract_dir, output_zip_path)
+
+    return {
+        "output_path": output_zip_path,
+        "fixed_patch_count": len(fixed_patch_results),
+        "patch_results": fixed_patch_results,
+        "incomplete_patch_groups": incomplete_groups,
     }

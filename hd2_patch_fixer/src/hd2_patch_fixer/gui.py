@@ -4,7 +4,11 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .archive import create_fixed_patch
+from .archive import (
+    create_fixed_mod_archive,
+    create_fixed_patch,
+    normalize_archive_selection,
+)
 from .constants import TYPE_LABELS
 
 
@@ -12,12 +16,14 @@ class PatchFixerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("HD2 Patch Fixer")
-        self.root.geometry("860x700")
-        self.root.minsize(760, 620)
+        self.root.geometry("920x760")
+        self.root.minsize(820, 680)
 
         self.game_path_var = tk.StringVar()
         self.patch_path_var = tk.StringVar()
-        self.export_path_var = tk.StringVar()
+        self.patch_export_path_var = tk.StringVar()
+        self.mod_archive_path_var = tk.StringVar()
+        self.mod_export_zip_var = tk.StringVar()
         self.keep_unknown_var = tk.BooleanVar(value=True)
         self.raw_fallback_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Ready")
@@ -29,6 +35,10 @@ class PatchFixerApp:
 
         self.log_queue = queue.Queue()
         self.is_running = False
+        self.fix_button = None
+        self.mode_notebook = None
+        self.single_tab = None
+        self.compressed_tab = None
 
         self._build_layout()
         self._poll_logs()
@@ -39,7 +49,7 @@ class PatchFixerApp:
 
         header = ttk.Label(
             container,
-            text="Fix broken Helldivers 2 patch by rebuilding it from the default archive",
+            text="Fix broken Helldivers 2 patch files and compressed mod packages",
             font=("Segoe UI", 11, "bold"),
         )
         header.pack(anchor="w", pady=(0, 10))
@@ -47,10 +57,10 @@ class PatchFixerApp:
         desc = ttk.Label(
             container,
             text=(
-                "Flow: choose game data folder, choose broken patch, choose export folder, "
-                "pick the data types to keep, then press Fix."
+                "Choose the game data folder, then either fix one patch directly or import a "
+                "compressed mod archive and rebuild every patch inside it."
             ),
-            wraplength=820,
+            wraplength=880,
         )
         desc.pack(anchor="w", pady=(0, 12))
 
@@ -60,21 +70,53 @@ class PatchFixerApp:
             self.game_path_var,
             lambda: self._choose_directory(self.game_path_var),
         )
+
+        self.mode_notebook = ttk.Notebook(container)
+        self.mode_notebook.pack(fill="x", pady=(8, 12))
+
+        self.single_tab = ttk.Frame(self.mode_notebook, padding=10)
+        self.compressed_tab = ttk.Frame(self.mode_notebook, padding=10)
+        self.mode_notebook.add(self.single_tab, text="Single Patch")
+        self.mode_notebook.add(self.compressed_tab, text="Compressed Mods")
+
         self._build_path_picker(
-            container,
+            self.single_tab,
             "Broken Patch File",
             self.patch_path_var,
             lambda: self._choose_patch_file(self.patch_path_var),
         )
         self._build_path_picker(
-            container,
+            self.single_tab,
             "Export Folder",
-            self.export_path_var,
-            lambda: self._choose_directory(self.export_path_var),
+            self.patch_export_path_var,
+            lambda: self._choose_directory(self.patch_export_path_var),
         )
 
+        self._build_path_picker(
+            self.compressed_tab,
+            "Compressed Mod File",
+            self.mod_archive_path_var,
+            lambda: self._choose_mod_archive_file(self.mod_archive_path_var),
+        )
+        self._build_path_picker(
+            self.compressed_tab,
+            "Export Zip File",
+            self.mod_export_zip_var,
+            self._choose_export_zip_file,
+        )
+
+        archive_help = ttk.Label(
+            self.compressed_tab,
+            text=(
+                "Supported input formats: .zip, .7z, .rar. The output is always a .zip with the "
+                "same folder layout and manifest files preserved."
+            ),
+            wraplength=840,
+        )
+        archive_help.pack(anchor="w", pady=(4, 0))
+
         options_frame = ttk.LabelFrame(container, text="Data Types To Keep", padding=10)
-        options_frame.pack(fill="x", pady=(8, 12))
+        options_frame.pack(fill="x", pady=(0, 12))
 
         buttons_row = ttk.Frame(options_frame)
         buttons_row.pack(fill="x", pady=(0, 8))
@@ -109,7 +151,7 @@ class PatchFixerApp:
         actions = ttk.Frame(container)
         actions.pack(fill="x", pady=(0, 12))
 
-        self.fix_button = ttk.Button(actions, text="Fix Patch", command=self._start_fix)
+        self.fix_button = ttk.Button(actions, text="Fix", command=self._start_fix)
         self.fix_button.pack(side="left")
 
         ttk.Label(actions, textvariable=self.status_var).pack(side="left", padx=(12, 0))
@@ -144,7 +186,33 @@ class PatchFixerApp:
             filetypes=[("Patch or archive files", "*")],
         )
         if selected:
+            variable.set(normalize_archive_selection(selected))
+
+    def _choose_mod_archive_file(self, variable):
+        selected = filedialog.askopenfilename(
+            title="Select compressed mod archive",
+            filetypes=[
+                ("Compressed mod archives", "*.zip *.7z *.rar"),
+                ("All files", "*"),
+            ],
+        )
+        if selected:
             variable.set(selected)
+            if not self.mod_export_zip_var.get().strip():
+                default_name = f"{Path(selected).stem}_fixed.zip"
+                variable_parent = Path(selected).parent
+                self.mod_export_zip_var.set(str(variable_parent / default_name))
+
+    def _choose_export_zip_file(self):
+        initial_file = self.mod_export_zip_var.get().strip() or "fixed_mod.zip"
+        selected = filedialog.asksaveasfilename(
+            title="Choose output zip file",
+            defaultextension=".zip",
+            initialfile=Path(initial_file).name,
+            filetypes=[("Zip archives", "*.zip")],
+        )
+        if selected:
+            self.mod_export_zip_var.set(selected)
 
     def _set_all_types(self, value: bool):
         for var in self.type_vars.values():
@@ -167,17 +235,7 @@ class PatchFixerApp:
                     self.fix_button.configure(state="normal")
                     self.status_var.set("Done")
                     self._append_log("Fix completed successfully.")
-                    output_path = payload["output_path"]
-                    kept_entries = payload["kept_entries"]
-                    skipped_entries = payload["skipped_entries"]
-                    messagebox.showinfo(
-                        "Fix completed",
-                        (
-                            f"Fixed patch created:\n{output_path}\n\n"
-                            f"Copied entries: {kept_entries}\n"
-                            f"Skipped entries: {skipped_entries}"
-                        ),
-                    )
+                    self._show_completion(payload)
                 elif kind == "error":
                     self.is_running = False
                     self.fix_button.configure(state="normal")
@@ -188,34 +246,80 @@ class PatchFixerApp:
             pass
         self.root.after(100, self._poll_logs)
 
-    def _validate_inputs(self):
-        game_dir = self.game_path_var.get().strip()
-        patch_path = self.patch_path_var.get().strip()
-        export_dir = self.export_path_var.get().strip()
+    def _show_completion(self, payload: dict):
+        if payload["mode"] == "single_patch":
+            messagebox.showinfo(
+                "Fix completed",
+                (
+                    f"Fixed patch created:\n{payload['output_path']}\n\n"
+                    f"Copied entries: {payload['kept_entries']}\n"
+                    f"Skipped entries: {payload['skipped_entries']}"
+                ),
+            )
+            return
 
-        if not game_dir:
-            raise ValueError("Please choose the game data folder first.")
-        if not patch_path:
-            raise ValueError("Please choose the broken patch file.")
-        if not export_dir:
-            raise ValueError("Please choose the export folder.")
-        if Path(patch_path).suffix.lower() in [".stream", ".gpu_resources"]:
-            raise ValueError("Please select the base patch file, not the .stream or .gpu_resources file.")
+        messagebox.showinfo(
+            "Fix completed",
+            (
+                f"Fixed mod archive created:\n{payload['output_path']}\n\n"
+                f"Fixed patch files inside archive: {payload['fixed_patch_count']}"
+            ),
+        )
 
+    def _current_mode(self):
+        return "compressed_mods" if self.mode_notebook.select() == str(self.compressed_tab) else "single_patch"
+
+    def _collect_keep_type_ids(self):
         keep_type_ids = {
             type_id for type_id, var in self.type_vars.items() if var.get()
         }
         if not keep_type_ids and not self.keep_unknown_var.get():
             raise ValueError("Please keep at least one type, or enable Keep Unknown Types.")
+        return keep_type_ids
 
-        return game_dir, patch_path, export_dir, keep_type_ids
+    def _validate_inputs(self):
+        game_dir = self.game_path_var.get().strip()
+        if not game_dir:
+            raise ValueError("Please choose the game data folder first.")
+
+        keep_type_ids = self._collect_keep_type_ids()
+        mode = self._current_mode()
+
+        if mode == "single_patch":
+            patch_path = self.patch_path_var.get().strip()
+            export_dir = self.patch_export_path_var.get().strip()
+            if not patch_path:
+                raise ValueError("Please choose the broken patch file.")
+            if not export_dir:
+                raise ValueError("Please choose the export folder.")
+            return {
+                "mode": mode,
+                "game_dir": game_dir,
+                "patch_path": normalize_archive_selection(patch_path),
+                "export_dir": export_dir,
+                "keep_type_ids": keep_type_ids,
+            }
+
+        archive_path = self.mod_archive_path_var.get().strip()
+        export_zip = self.mod_export_zip_var.get().strip()
+        if not archive_path:
+            raise ValueError("Please choose the compressed mod file.")
+        if not export_zip:
+            raise ValueError("Please choose the export zip file.")
+        return {
+            "mode": mode,
+            "game_dir": game_dir,
+            "archive_path": archive_path,
+            "export_zip": export_zip,
+            "keep_type_ids": keep_type_ids,
+        }
 
     def _start_fix(self):
         if self.is_running:
             return
 
         try:
-            game_dir, patch_path, export_dir, keep_type_ids = self._validate_inputs()
+            job = self._validate_inputs()
         except ValueError as exc:
             messagebox.showerror("Missing input", str(exc))
             return
@@ -224,33 +328,42 @@ class PatchFixerApp:
         self.fix_button.configure(state="disabled")
         self.status_var.set("Running")
         self._append_log("")
-        self._append_log("Starting fix operation...")
+        if job["mode"] == "single_patch":
+            self._append_log("Starting single patch fix operation...")
+        else:
+            self._append_log("Starting compressed mod fix operation...")
 
         thread = threading.Thread(
             target=self._run_fix,
-            args=(
-                game_dir,
-                patch_path,
-                export_dir,
-                keep_type_ids,
-                self.keep_unknown_var.get(),
-                self.raw_fallback_var.get(),
-            ),
+            args=(job,),
             daemon=True,
         )
         thread.start()
 
-    def _run_fix(self, game_dir, patch_path, export_dir, keep_type_ids, keep_unknown, raw_fallback):
+    def _run_fix(self, job: dict):
         try:
-            result = create_fixed_patch(
-                game_data_folder=game_dir,
-                broken_patch_path=patch_path,
-                export_dir=export_dir,
-                keep_type_ids=keep_type_ids,
-                keep_unknown_types=keep_unknown,
-                raw_fallback_for_unsupported=raw_fallback,
-                log=lambda message: self.log_queue.put(("log", message)),
-            )
+            if job["mode"] == "single_patch":
+                result = create_fixed_patch(
+                    game_data_folder=job["game_dir"],
+                    broken_patch_path=job["patch_path"],
+                    export_dir=job["export_dir"],
+                    keep_type_ids=job["keep_type_ids"],
+                    keep_unknown_types=self.keep_unknown_var.get(),
+                    raw_fallback_for_unsupported=self.raw_fallback_var.get(),
+                    log=lambda message: self.log_queue.put(("log", message)),
+                )
+                result["mode"] = "single_patch"
+            else:
+                result = create_fixed_mod_archive(
+                    game_data_folder=job["game_dir"],
+                    input_archive_path=job["archive_path"],
+                    output_zip_path=job["export_zip"],
+                    keep_type_ids=job["keep_type_ids"],
+                    keep_unknown_types=self.keep_unknown_var.get(),
+                    raw_fallback_for_unsupported=self.raw_fallback_var.get(),
+                    log=lambda message: self.log_queue.put(("log", message)),
+                )
+                result["mode"] = "compressed_mods"
             self.log_queue.put(("done", result))
         except Exception as exc:
             self.log_queue.put(("error", str(exc)))

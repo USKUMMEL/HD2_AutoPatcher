@@ -27,6 +27,7 @@ from .parsers import (
     StingrayParticles,
     StingrayStateMachine,
     StingrayTexture,
+    StingrayUnit,
 )
 from .slim import get_package_toc, is_slim_version, load_package, slim_init
 
@@ -60,6 +61,353 @@ class TocFileType:
         self.unk2 = toc_file.uint32(self.unk2)
         self.unk3 = toc_file.uint32(self.unk3)
         return self
+
+
+@dataclass(frozen=True)
+class UnitVertexComponent:
+    RECORD_SIZE = 20
+    type_id: int = 0
+    format_id: int = 0
+    index: int = 0
+    unknown: int = 0
+
+    def serialize(self, stream: MemoryStream):
+        return UnitVertexComponent(
+            type_id=stream.uint32(self.type_id),
+            format_id=stream.uint32(self.format_id),
+            index=stream.uint32(self.index),
+            unknown=stream.uint64(self.unknown),
+        )
+
+    @property
+    def key(self):
+        return (self.type_id, self.format_id, self.index)
+
+    @property
+    def size(self):
+        size_lut = {
+            0: 4,
+            2: 12,
+            4: 4,
+            20: 16,
+            24: 4,
+            25: 4,
+            26: 4,
+            29: 4,
+            31: 8,
+        }
+        if self.format_id not in size_lut:
+            raise ValueError(f"Unsupported Unit vertex format: {self.format_id}")
+        return size_lut[self.format_id]
+
+
+@dataclass
+class UnitStreamInfo:
+    components: list[UnitVertexComponent]
+    component_info_id: int = 0
+    vertex_buffer_id: int = 0
+    vertex_buffer_unk1: int = 0
+    num_vertices: int = 0
+    vertex_stride: int = 0
+    vertex_buffer_unk2: int = 0
+    vertex_buffer_unk3: int = 0
+    index_buffer_id: int = 0
+    index_buffer_unk1: int = 0
+    num_indices: int = 0
+    index_buffer_type: int = 0
+    index_buffer_unk2: int = 0
+    index_buffer_unk3: int = 0
+    vertex_buffer_offset: int = 0
+    vertex_buffer_size: int = 0
+    index_buffer_offset: int = 0
+    index_buffer_size: int = 0
+    ending_bytes: bytes = b"\x00" * 16
+
+    @classmethod
+    def parse(cls, stream: MemoryStream):
+        component_info_id = stream.uint64(0)
+        component_area_offset = stream.tell()
+        stream.seek(component_area_offset + 320)
+        num_components = stream.uint64(0)
+        vertex_buffer_id = stream.uint64(0)
+        vertex_buffer_unk1 = stream.uint64(0)
+        num_vertices = stream.uint32(0)
+        vertex_stride = stream.uint32(0)
+        vertex_buffer_unk2 = stream.uint64(0)
+        vertex_buffer_unk3 = stream.uint64(0)
+        index_buffer_id = stream.uint64(0)
+        index_buffer_unk1 = stream.uint64(0)
+        num_indices = stream.uint32(0)
+        index_buffer_type = stream.uint32(0)
+        index_buffer_unk2 = stream.uint64(0)
+        index_buffer_unk3 = stream.uint64(0)
+        vertex_buffer_offset = stream.uint32(0)
+        vertex_buffer_size = stream.uint32(0)
+        index_buffer_offset = stream.uint32(0)
+        index_buffer_size = stream.uint32(0)
+        ending_bytes = bytes(stream.bytes(bytearray(16), 16))
+
+        record_end = ceil(float(stream.tell()) / 16) * 16
+        stream.seek(component_area_offset)
+        components = []
+        for _ in range(num_components):
+            component = UnitVertexComponent().serialize(stream)
+            components.append(component)
+        stream.seek(record_end)
+
+        return cls(
+            components=components,
+            component_info_id=component_info_id,
+            vertex_buffer_id=vertex_buffer_id,
+            vertex_buffer_unk1=vertex_buffer_unk1,
+            num_vertices=num_vertices,
+            vertex_stride=vertex_stride,
+            vertex_buffer_unk2=vertex_buffer_unk2,
+            vertex_buffer_unk3=vertex_buffer_unk3,
+            index_buffer_id=index_buffer_id,
+            index_buffer_unk1=index_buffer_unk1,
+            num_indices=num_indices,
+            index_buffer_type=index_buffer_type,
+            index_buffer_unk2=index_buffer_unk2,
+            index_buffer_unk3=index_buffer_unk3,
+            vertex_buffer_offset=vertex_buffer_offset,
+            vertex_buffer_size=vertex_buffer_size,
+            index_buffer_offset=index_buffer_offset,
+            index_buffer_size=index_buffer_size,
+            ending_bytes=ending_bytes,
+        )
+
+    def write(self, stream: MemoryStream):
+        stream.uint64(self.component_info_id)
+        for component in self.components:
+            stream.uint32(component.type_id)
+            stream.uint32(component.format_id)
+            stream.uint32(component.index)
+            stream.uint64(component.unknown)
+        component_bytes = len(self.components) * UnitVertexComponent.RECORD_SIZE
+        if component_bytes > 320:
+            raise ValueError("Unit stream contains too many vertex components")
+        stream.write(b"\x00" * (320 - component_bytes))
+        stream.uint64(len(self.components))
+        stream.uint64(self.vertex_buffer_id)
+        stream.uint64(self.vertex_buffer_unk1)
+        stream.uint32(self.num_vertices)
+        stream.uint32(self.vertex_stride)
+        stream.uint64(self.vertex_buffer_unk2)
+        stream.uint64(self.vertex_buffer_unk3)
+        stream.uint64(self.index_buffer_id)
+        stream.uint64(self.index_buffer_unk1)
+        stream.uint32(self.num_indices)
+        stream.uint32(self.index_buffer_type)
+        stream.uint64(self.index_buffer_unk2)
+        stream.uint64(self.index_buffer_unk3)
+        stream.uint32(self.vertex_buffer_offset)
+        stream.uint32(self.vertex_buffer_size)
+        stream.uint32(self.index_buffer_offset)
+        stream.uint32(self.index_buffer_size)
+        stream.write(self.ending_bytes[:16].ljust(16, b"\x00"))
+        aligned_end = ceil(float(stream.tell()) / 16) * 16
+        stream.seek(aligned_end)
+
+
+@dataclass
+class UnitStreamSection:
+    stream_infos: list[UnitStreamInfo]
+    stream_unk_ids: list[int]
+    stream_unk2: int = 0
+
+    @classmethod
+    def parse(cls, data: bytes):
+        stream = MemoryStream(data)
+        num_streams = stream.uint32(0)
+        offsets = [stream.uint32(0) for _ in range(num_streams)]
+        stream_unk_ids = [stream.uint32(0) for _ in range(num_streams)]
+        stream_unk2 = stream.uint32(0)
+        stream_infos = []
+        for offset in offsets:
+            stream.seek(offset)
+            stream_infos.append(UnitStreamInfo.parse(stream))
+        return cls(stream_infos=stream_infos, stream_unk_ids=stream_unk_ids, stream_unk2=stream_unk2)
+
+    def build(self):
+        stream = MemoryStream(io_mode="write")
+        stream.uint32(len(self.stream_infos))
+        offset_positions = [stream.tell() + (index * 4) for index in range(len(self.stream_infos))]
+        for _ in self.stream_infos:
+            stream.uint32(0)
+        for value in self.stream_unk_ids:
+            stream.uint32(value)
+        stream.uint32(self.stream_unk2)
+
+        record_offsets = []
+        for info in self.stream_infos:
+            record_offsets.append(stream.tell())
+            info.write(stream)
+
+        end_location = stream.tell()
+        for position, offset in zip(offset_positions, record_offsets):
+            stream.seek(position)
+            stream.uint32(offset)
+        stream.seek(end_location)
+        return bytes(stream.data)
+
+
+@dataclass
+class UnitMeshSectionInfo:
+    material_index: int = 0
+    vertex_offset: int = 0
+    num_vertices: int = 0
+    index_offset: int = 0
+    num_indices: int = 0
+    group_index: int = 0
+
+    @classmethod
+    def parse(cls, stream: MemoryStream):
+        return cls(
+            material_index=stream.uint32(0),
+            vertex_offset=stream.uint32(0),
+            num_vertices=stream.uint32(0),
+            index_offset=stream.uint32(0),
+            num_indices=stream.uint32(0),
+            group_index=stream.uint32(0),
+        )
+
+    def write(self, stream: MemoryStream):
+        stream.uint32(self.material_index)
+        stream.uint32(self.vertex_offset)
+        stream.uint32(self.num_vertices)
+        stream.uint32(self.index_offset)
+        stream.uint32(self.num_indices)
+        stream.uint32(self.group_index)
+
+
+@dataclass
+class UnitMeshInfo:
+    mesh_id: int = 0
+    lod_index: int = -1
+    stream_index: int = 0
+    transform_index: int = 0
+    unk1: int = 0
+    unk2: bytes = b"\x00" * 32
+    unk3: int = 0
+    unk4: int = 0
+    unk6: bytes = b"\x00" * 40
+    unk8: int = 0
+    material_ids: list[int] = None
+    sections: list[UnitMeshSectionInfo] = None
+
+    def __post_init__(self):
+        if self.material_ids is None:
+            self.material_ids = []
+        if self.sections is None:
+            self.sections = []
+
+    @classmethod
+    def parse(cls, stream: MemoryStream):
+        unk1 = stream.uint64(0)
+        unk2 = bytes(stream.bytes(bytearray(32), 32))
+        mesh_id = stream.uint32(0)
+        unk3 = stream.uint32(0)
+        transform_index = stream.uint32(0)
+        unk4 = stream.uint32(0)
+        lod_index = stream.int32(0)
+        stream_index = stream.uint32(0)
+        unk6 = bytes(stream.bytes(bytearray(40), 40))
+        num_materials = stream.uint32(0)
+        material_offset = stream.uint32(0)
+        unk8 = stream.uint64(0)
+        num_sections = stream.uint32(0)
+        sections_offset = stream.uint32(0)
+        material_ids = [stream.uint32(0) for _ in range(num_materials)]
+        sections = [UnitMeshSectionInfo.parse(stream) for _ in range(num_sections)]
+        return cls(
+            mesh_id=mesh_id,
+            lod_index=lod_index,
+            stream_index=stream_index,
+            transform_index=transform_index,
+            unk1=unk1,
+            unk2=unk2,
+            unk3=unk3,
+            unk4=unk4,
+            unk6=unk6,
+            unk8=unk8,
+            material_ids=material_ids,
+            sections=sections,
+        )
+
+    def write(self, stream: MemoryStream):
+        record_start = stream.tell()
+        stream.uint64(self.unk1)
+        stream.write(self.unk2[:32].ljust(32, b"\x00"))
+        stream.uint32(self.mesh_id)
+        stream.uint32(self.unk3)
+        stream.uint32(self.transform_index)
+        stream.uint32(self.unk4)
+        stream.int32(self.lod_index)
+        stream.uint32(self.stream_index)
+        stream.write(self.unk6[:40].ljust(40, b"\x00"))
+        num_materials = len(self.material_ids)
+        num_sections = len(self.sections)
+        stream.uint32(num_materials)
+        material_offset_location = stream.tell()
+        stream.uint32(0)
+        stream.uint64(self.unk8)
+        stream.uint32(num_sections)
+        sections_offset_location = stream.tell()
+        stream.uint32(0)
+
+        material_offset = stream.tell() - record_start
+        for material_id in self.material_ids:
+            stream.uint32(material_id)
+        sections_offset = stream.tell() - record_start
+        for section in self.sections:
+            section.write(stream)
+
+        record_end = stream.tell()
+        stream.seek(material_offset_location)
+        stream.uint32(material_offset)
+        stream.seek(sections_offset_location)
+        stream.uint32(sections_offset)
+        stream.seek(record_end)
+
+
+@dataclass
+class UnitMeshSection:
+    mesh_infos: list[UnitMeshInfo]
+    mesh_unk_ids: list[int]
+
+    @classmethod
+    def parse(cls, data: bytes):
+        stream = MemoryStream(data)
+        num_meshes = stream.uint32(0)
+        offsets = [stream.uint32(0) for _ in range(num_meshes)]
+        mesh_unk_ids = [stream.uint32(0) for _ in range(num_meshes)]
+        mesh_infos = []
+        for offset in offsets:
+            stream.seek(offset)
+            mesh_infos.append(UnitMeshInfo.parse(stream))
+        return cls(mesh_infos=mesh_infos, mesh_unk_ids=mesh_unk_ids)
+
+    def build(self):
+        stream = MemoryStream(io_mode="write")
+        stream.uint32(len(self.mesh_infos))
+        offset_positions = [stream.tell() + (index * 4) for index in range(len(self.mesh_infos))]
+        for _ in self.mesh_infos:
+            stream.uint32(0)
+        for value in self.mesh_unk_ids:
+            stream.uint32(value)
+
+        record_offsets = []
+        for info in self.mesh_infos:
+            record_offsets.append(stream.tell())
+            info.write(stream)
+
+        end_location = stream.tell()
+        for position, offset in zip(offset_positions, record_offsets):
+            stream.seek(position)
+            stream.uint32(offset)
+        stream.seek(end_location)
+        return bytes(stream.data)
 
 
 class TocEntry:
@@ -527,6 +875,227 @@ def resolve_unit_source_entry(
     return None, None
 
 
+def extract_unit_stream_sections(unit: StingrayUnit):
+    stream_blob = unit.section_blobs.get("stream_info", b"")
+    if not stream_blob:
+        return None
+    return UnitStreamSection.parse(stream_blob)
+
+
+def extract_unit_mesh_sections(unit: StingrayUnit):
+    mesh_blob = unit.section_blobs.get("mesh_info", b"")
+    if not mesh_blob:
+        return None
+    return UnitMeshSection.parse(mesh_blob)
+
+
+def default_component_bytes(component: UnitVertexComponent):
+    if component.type_id == 5 and component.format_id == 4:
+        return b"\xFF\xFF\xFF\xFF"
+    if component.type_id == 7 and component.format_id == 31:
+        return b"\x00\x3C\x00\x00\x00\x00\x00\x00"
+    return b"\x00" * component.size
+
+
+def rebuild_vertex_buffer_for_layout(
+    old_buffer: bytes,
+    old_info: UnitStreamInfo,
+    target_components: list[UnitVertexComponent],
+):
+    old_stride = old_info.vertex_stride
+    if old_stride <= 0:
+        raise ValueError("Unit stream has invalid vertex stride")
+    expected_size = old_info.num_vertices * old_stride
+    if len(old_buffer) < expected_size:
+        raise ValueError("Unit vertex buffer is smaller than expected")
+
+    old_component_offsets = {}
+    running_offset = 0
+    for component in old_info.components:
+        old_component_offsets[component.key] = (running_offset, component.size)
+        running_offset += component.size
+    if running_offset != old_info.vertex_stride:
+        raise ValueError("Unit stream component sizes do not match vertex stride")
+
+    new_parts = []
+    for vertex_index in range(old_info.num_vertices):
+        vertex_start = vertex_index * old_stride
+        for component in target_components:
+            component_info = old_component_offsets.get(component.key)
+            if component_info is None:
+                if component.type_id in {0, 1, 6, 7}:
+                    raise ValueError(
+                        f"Missing critical vertex component {component.key} in stream layout"
+                    )
+                new_parts.append(default_component_bytes(component))
+                continue
+            component_offset, component_size = component_info
+            new_parts.append(
+                old_buffer[
+                    vertex_start + component_offset: vertex_start + component_offset + component_size
+                ]
+            )
+    return b"".join(new_parts)
+
+
+def repair_unit_stream_layout_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_streams = extract_unit_stream_sections(source_unit)
+    entry_streams = extract_unit_stream_sections(entry_unit)
+    if source_streams is None or entry_streams is None:
+        return False
+    if len(source_streams.stream_infos) != len(entry_streams.stream_infos):
+        return False
+
+    new_gpu = bytearray()
+    changed = False
+    rebuilt_infos = []
+
+    for stream_index, (source_info, entry_info) in enumerate(zip(source_streams.stream_infos, entry_streams.stream_infos)):
+        old_vertex_end = entry_info.vertex_buffer_offset + entry_info.vertex_buffer_size
+        old_index_end = entry_info.index_buffer_offset + entry_info.index_buffer_size
+        if old_vertex_end > len(entry.gpu_data) or old_index_end > len(entry.gpu_data):
+            return False
+
+        old_vertex_buffer = bytes(entry.gpu_data[entry_info.vertex_buffer_offset:old_vertex_end])
+        old_index_buffer = bytes(entry.gpu_data[entry_info.index_buffer_offset:old_index_end])
+
+        source_layout = [component.key for component in source_info.components]
+        entry_layout = [component.key for component in entry_info.components]
+        extra_entry_components = [
+            component for component in entry_info.components
+            if component.key not in source_layout
+        ]
+        target_components = list(source_info.components) + extra_entry_components
+        target_layout = [component.key for component in target_components]
+
+        if target_layout != entry_layout:
+            rebuilt_vertex_buffer = rebuild_vertex_buffer_for_layout(
+                old_vertex_buffer,
+                entry_info,
+                target_components,
+            )
+            changed = True
+            log_message(
+                log,
+                f"REPAIRED Unit stream layout {entry.file_id} stream {stream_index}: {entry_layout} -> {target_layout}",
+            )
+        else:
+            rebuilt_vertex_buffer = old_vertex_buffer
+
+        new_info = copy.deepcopy(entry_info)
+        new_info.components = list(target_components)
+        new_info.num_vertices = entry_info.num_vertices
+        new_info.num_indices = entry_info.num_indices
+        new_info.vertex_stride = sum(component.size for component in target_components)
+        new_info.vertex_buffer_offset = len(new_gpu)
+        new_info.vertex_buffer_size = len(rebuilt_vertex_buffer)
+        new_gpu.extend(rebuilt_vertex_buffer)
+        new_info.index_buffer_offset = len(new_gpu)
+        new_info.index_buffer_size = len(old_index_buffer)
+        new_gpu.extend(old_index_buffer)
+        rebuilt_infos.append(new_info)
+
+    if not changed:
+        return False
+
+    rebuilt_stream_section = copy.deepcopy(entry_streams)
+    rebuilt_stream_section.stream_infos = rebuilt_infos
+    if len(source_streams.stream_unk_ids) == len(rebuilt_stream_section.stream_unk_ids):
+        rebuilt_stream_section.stream_unk_ids = list(source_streams.stream_unk_ids)
+
+    entry_unit.section_blobs["stream_info"] = rebuilt_stream_section.build()
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    entry.gpu_data = bytes(new_gpu)
+    return True
+
+
+def repair_unit_mesh_order_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_meshes = extract_unit_mesh_sections(source_unit)
+    entry_meshes = extract_unit_mesh_sections(entry_unit)
+    if source_meshes is None or entry_meshes is None:
+        return False
+    if len(source_meshes.mesh_infos) != len(entry_meshes.mesh_infos):
+        return False
+
+    source_ids = [mesh.mesh_id for mesh in source_meshes.mesh_infos]
+    entry_by_id = {mesh.mesh_id: mesh for mesh in entry_meshes.mesh_infos}
+    if set(source_ids) != set(entry_by_id):
+        return False
+
+    changed = False
+    reordered_infos = []
+    for source_mesh in source_meshes.mesh_infos:
+        entry_mesh = copy.deepcopy(entry_by_id[source_mesh.mesh_id])
+        if (
+            entry_mesh.transform_index != source_mesh.transform_index
+            or entry_mesh.stream_index != source_mesh.stream_index
+            or entry_mesh.lod_index != source_mesh.lod_index
+        ):
+            changed = True
+        entry_mesh.transform_index = source_mesh.transform_index
+        entry_mesh.stream_index = source_mesh.stream_index
+        entry_mesh.lod_index = source_mesh.lod_index
+        reordered_infos.append(entry_mesh)
+
+    if [mesh.mesh_id for mesh in entry_meshes.mesh_infos] != source_ids:
+        changed = True
+
+    if not changed:
+        return False
+
+    entry_meshes.mesh_infos = reordered_infos
+    entry_meshes.mesh_unk_ids = [mesh.mesh_id for mesh in reordered_infos]
+    entry_unit.section_blobs["mesh_info"] = entry_meshes.build()
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(log, f"REORDERED Unit mesh info from source layout: {entry.file_id}")
+    return True
+
+
+def repair_unit_lod_group_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_blob = source_unit.section_blobs.get("lod_group_list", b"")
+    entry_blob = entry_unit.section_blobs.get("lod_group_list", b"")
+    if not source_blob or source_blob == entry_blob:
+        return False
+
+    entry_unit.section_blobs["lod_group_list"] = bytes(source_blob)
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(log, f"REPLACED Unit lod_group_list from source: {entry.file_id}")
+    return True
+
+
 def normalize_unit_entry_from_source(
     entry,
     default_archive: StreamToc,
@@ -543,12 +1112,35 @@ def normalize_unit_entry_from_source(
     if len(entry.toc_data) < 88 or len(source_entry.toc_data) < 88:
         return False
 
-    normalized = bytearray(entry.toc_data)
-    source_toc = bytes(source_entry.toc_data)
-    normalized[40:88] = source_toc[40:88]
-    entry.toc_data = bytes(normalized)
-    log_message(log, f"NORMALIZED Unit structural segment 40..88 from {source_name}: {entry.file_id}")
-    return True
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+
+    repaired_layout = False
+    try:
+        repaired_layout = repair_unit_stream_layout_from_source(entry, source_entry, log=log)
+    except Exception as exc:
+        log_message(log, f"FAILED Unit stream layout repair for {entry.file_id}: {exc}")
+    try:
+        repaired_layout = repair_unit_mesh_order_from_source(entry, source_entry, log=log) or repaired_layout
+    except Exception as exc:
+        log_message(log, f"FAILED Unit mesh order repair for {entry.file_id}: {exc}")
+    try:
+        repaired_layout = repair_unit_lod_group_from_source(entry, source_entry, log=log) or repaired_layout
+    except Exception as exc:
+        log_message(log, f"FAILED Unit LOD group repair for {entry.file_id}: {exc}")
+
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+    old_header = entry_unit.header_data_1
+    entry_unit.header_data_1 = source_unit.header_data_1
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(
+        log,
+        f"NORMALIZED Unit header_data_1 from {source_name}: {entry.file_id} ({old_header} -> {entry_unit.header_data_1})",
+    )
+    return repaired_layout or True
 
 
 def build_entry_from_source(
@@ -560,11 +1152,28 @@ def build_entry_from_source(
 ):
     mode = "raw"
     if entry.type_id in SUPPORTED_REBUILD_TYPES:
-        toc_data, gpu_data, stream_data, mode = rebuild_entry_payload(entry)
-        new_entry = entry.clone()
-        new_entry.toc_data = toc_data
-        new_entry.gpu_data = gpu_data
-        new_entry.stream_data = stream_data
+        try:
+            toc_data, gpu_data, stream_data, mode = rebuild_entry_payload(entry)
+            new_entry = entry.clone()
+            new_entry.toc_data = toc_data
+            new_entry.gpu_data = gpu_data
+            new_entry.stream_data = stream_data
+        except Exception as exc:
+            if not raw_fallback_for_unsupported:
+                raise
+            new_entry = entry.clone()
+            mode = "raw-fallback"
+            log_message(
+                log,
+                f"REBUILD FAILED for {TYPE_NAME_MAP.get(entry.type_id, entry.type_id)} {entry.file_id}: {exc}",
+            )
+            if entry.type_id == UnitID:
+                normalize_unit_entry_from_source(
+                    new_entry,
+                    default_archive,
+                    archive_index=archive_index,
+                    log=log,
+                )
     elif raw_fallback_for_unsupported:
         new_entry = entry.clone()
         mode = "raw-fallback"
@@ -630,17 +1239,27 @@ def add_unit_dependencies(
             if fixed_patch.get_entry(ref_id, type_id) is not None:
                 continue
 
-            source_entry, source_name = resolve_dependency_entry(
-                ref_id,
-                type_id,
-                broken_patch,
-                default_archive,
-                archive_index=archive_index,
-            )
+            source_entry = broken_patch.get_entry(ref_id, type_id)
             if source_entry is None:
-                unresolved.append((unit_entry.file_id, label, ref_id))
-                log_message(log, f"UNRESOLVED dependency for unit {unit_entry.file_id}: {label} {ref_id}")
+                _external_entry, external_name = resolve_dependency_entry(
+                    ref_id,
+                    type_id,
+                    StreamToc(),
+                    default_archive,
+                    archive_index=archive_index,
+                )
+                if external_entry is None:
+                    unresolved.append((unit_entry.file_id, label, ref_id))
+                    log_message(log, f"UNRESOLVED dependency for unit {unit_entry.file_id}: {label} {ref_id}")
+                else:
+                    log_message(
+                        log,
+                        f"LEAVING external {label} dependency unresolved in patch for unit {unit_entry.file_id}: "
+                        f"{ref_id} from {external_name}",
+                    )
                 continue
+
+            source_name = "broken patch"
 
             new_entry, mode = build_entry_from_source(
                 source_entry,
@@ -661,7 +1280,11 @@ def add_unit_dependencies(
     return unresolved
 
 
-def validate_unit_dependencies(fixed_patch: StreamToc):
+def validate_unit_dependencies(
+    fixed_patch: StreamToc,
+    default_archive: StreamToc | None = None,
+    archive_index: GameArchiveIndex | None = None,
+):
     unresolved = []
     dependency_specs = [
         ("bones_ref", BoneID, "Bones"),
@@ -674,8 +1297,13 @@ def validate_unit_dependencies(fixed_patch: StreamToc):
             ref_id = refs[ref_name]
             if ref_id == 0:
                 continue
-            if fixed_patch.get_entry(ref_id, type_id) is None:
-                unresolved.append((unit_entry.file_id, label, ref_id))
+            if fixed_patch.get_entry(ref_id, type_id) is not None:
+                continue
+            if default_archive is not None and default_archive.get_entry(ref_id, type_id) is not None:
+                continue
+            if archive_index is not None and archive_index.find_archive_path(ref_id, type_id) is not None:
+                continue
+            unresolved.append((unit_entry.file_id, label, ref_id))
     return unresolved
 
 
@@ -758,7 +1386,11 @@ def create_fixed_patch(
             log=log,
         )
 
-    unresolved_after_build = validate_unit_dependencies(fixed_patch)
+    unresolved_after_build = validate_unit_dependencies(
+        fixed_patch,
+        default_archive=default_archive,
+        archive_index=archive_index,
+    )
     if unresolved_after_build:
         lines = [
             f"Unit {unit_id} is missing {label} dependency {ref_id}"

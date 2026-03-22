@@ -1241,7 +1241,7 @@ def add_unit_dependencies(
 
             source_entry = broken_patch.get_entry(ref_id, type_id)
             if source_entry is None:
-                _external_entry, external_name = resolve_dependency_entry(
+                external_entry, external_name = resolve_dependency_entry(
                     ref_id,
                     type_id,
                     StreamToc(),

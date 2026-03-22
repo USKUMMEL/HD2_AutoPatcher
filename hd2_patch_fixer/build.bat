@@ -14,7 +14,7 @@ if exist dist rmdir /s /q dist
 python -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  --onedir ^
+  --onefile ^
   --windowed ^
   --name HD2PatchFixer ^
   --version-file build_version_info.txt ^
@@ -23,7 +23,7 @@ python -m PyInstaller ^
 if errorlevel 1 goto :error
 
 echo.
-echo Build complete. EXE is in dist\HD2PatchFixer\HD2PatchFixer.exe
+echo Build complete. EXE is in dist\HD2PatchFixer.exe
 pause
 exit /b 0
 

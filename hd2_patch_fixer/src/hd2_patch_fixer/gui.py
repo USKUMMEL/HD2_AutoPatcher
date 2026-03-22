@@ -20,14 +20,14 @@ from .constants import (
 )
 
 
-BG_APP = "#eef1f4"
-BG_PANEL = "#f7f8fa"
-BG_INPUT = "#ffffff"
-FG_MAIN = "#1f2933"
-FG_MUTED = "#5b6875"
-ACCENT = "#7d8b99"
-ACCENT_HOVER = "#6f7c89"
-BORDER = "#d8dde3"
+BG_APP = "#16181c"
+BG_PANEL = "#20242a"
+BG_INPUT = "#2a2f36"
+FG_MAIN = "#f1f3f5"
+FG_MUTED = "#a8b0b8"
+ACCENT = "#4f5863"
+ACCENT_HOVER = "#626d79"
+BORDER = "#343b44"
 DEFAULT_UNCHECKED_TYPE_IDS = {
     ParticleID,
     WwiseBankID,
@@ -114,7 +114,7 @@ class PatchFixerApp:
         )
         style.configure(
             "TNotebook.Tab",
-            background="#dde3e8",
+            background="#2b3138",
             foreground=FG_MAIN,
             padding=(16, 8),
             font=("Segoe UI", 10, "bold"),
@@ -122,7 +122,7 @@ class PatchFixerApp:
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", BG_PANEL), ("active", "#e6eaee")],
+            background=[("selected", "#353c45"), ("active", "#303740")],
         )
         style.configure(
             "TButton",
@@ -135,18 +135,18 @@ class PatchFixerApp:
         )
         style.map(
             "TButton",
-            background=[("active", ACCENT_HOVER), ("disabled", "#bcc6cf")],
-            foreground=[("disabled", "#f5f7f9")],
+            background=[("active", ACCENT_HOVER), ("disabled", "#3a4048")],
+            foreground=[("disabled", "#8f98a1")],
         )
         style.configure(
             "Secondary.TButton",
-            background="#cfd6dd",
+            background="#3a4048",
             foreground=FG_MAIN,
         )
         style.map(
             "Secondary.TButton",
-            background=[("active", "#c3cbd3"), ("disabled", "#dde3e8")],
-            foreground=[("disabled", "#7f8a94")],
+            background=[("active", "#4a525c"), ("disabled", "#30353c")],
+            foreground=[("disabled", "#7f8790")],
         )
         style.configure(
             "TCheckbutton",

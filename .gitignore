@@ -9,6 +9,10 @@ hd2_patch_fixer/build/
 hd2_patch_fixer/dist/
 hd2_patch_fixer/build_compressed_mods/
 hd2_patch_fixer/dist_compressed_mods/
+hd2_patch_fixer/build_pyside/
+hd2_patch_fixer/dist_pyside/
+hd2_patch_fixer/build_tk_light/
+hd2_patch_fixer/dist_tk_light/
 hd2_patch_fixer/smoke_*/
 
 patch/

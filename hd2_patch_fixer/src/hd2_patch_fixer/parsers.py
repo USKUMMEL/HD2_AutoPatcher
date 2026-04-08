@@ -649,3 +649,211 @@ class Unk03Item:
         for index, section in enumerate(self.sections):
             stream.seek(start_offset + self.section_offsets[index])
             section.save(stream)
+
+
+class StingrayUnit:
+    HEADER_SIZE = 128
+    SECTION_ORDER = [
+        "wwise_callback",
+        "pre_light_list",
+        "light_list",
+        "lod_group_list",
+        "transform_info",
+        "customization_info",
+        "unk_header_1",
+        "connecting_bone_hash",
+        "bone_info",
+        "stream_info",
+        "mesh_info",
+        "materials",
+    ]
+
+    def __init__(self):
+        self.unk_ref_1 = 0
+        self.bones_ref = 0
+        self.composite_ref = 0
+        self.unk_ref_2 = 0
+        self.state_machine_ref = 0
+        self.header_data_1 = 0
+        self.unreversed_lod_group_list_data_offset = 0
+        self.transform_info_offset = 0
+        self.light_list_offset = 0
+        self.unk_pre_light_list_offset = 0
+        self.wwise_callback_offset = 0
+        self.header_data_2 = bytearray(8)
+        self.customization_info_offset = 0
+        self.unk_header_offset_1 = 0
+        self.connecting_bone_hash_offset = 0
+        self.bone_info_offset = 0
+        self.stream_info_offset = 0
+        self.ending_offset = 0
+        self.mesh_info_offset = 0
+        self.header_unk = 0
+        self.materials_offset = 0
+        self.header_padding = bytearray(12)
+        self.section_blobs = {name: b"" for name in self.SECTION_ORDER}
+        self.section_owners = {name: name for name in self.SECTION_ORDER}
+        self.ending_bytes = 0
+        self.trailing_data = b""
+
+    def serialize(self, stream: MemoryStream):
+        if stream.is_reading():
+            self.load(stream)
+        else:
+            self.save(stream)
+        return self
+
+    def _offset_map(self):
+        return {
+            "wwise_callback": self.wwise_callback_offset,
+            "pre_light_list": self.unk_pre_light_list_offset,
+            "light_list": self.light_list_offset,
+            "lod_group_list": self.unreversed_lod_group_list_data_offset,
+            "transform_info": self.transform_info_offset,
+            "customization_info": self.customization_info_offset,
+            "unk_header_1": self.unk_header_offset_1,
+            "connecting_bone_hash": self.connecting_bone_hash_offset,
+            "bone_info": self.bone_info_offset,
+            "stream_info": self.stream_info_offset,
+            "mesh_info": self.mesh_info_offset,
+            "materials": self.materials_offset,
+        }
+
+    def _set_offset(self, name: str, value: int):
+        if name == "wwise_callback":
+            self.wwise_callback_offset = value
+        elif name == "pre_light_list":
+            self.unk_pre_light_list_offset = value
+        elif name == "light_list":
+            self.light_list_offset = value
+        elif name == "lod_group_list":
+            self.unreversed_lod_group_list_data_offset = value
+        elif name == "transform_info":
+            self.transform_info_offset = value
+        elif name == "customization_info":
+            self.customization_info_offset = value
+        elif name == "unk_header_1":
+            self.unk_header_offset_1 = value
+        elif name == "connecting_bone_hash":
+            self.connecting_bone_hash_offset = value
+        elif name == "bone_info":
+            self.bone_info_offset = value
+        elif name == "stream_info":
+            self.stream_info_offset = value
+        elif name == "mesh_info":
+            self.mesh_info_offset = value
+        elif name == "materials":
+            self.materials_offset = value
+        else:
+            raise ValueError(f"Unknown unit section: {name}")
+
+    def load(self, stream: MemoryStream):
+        start = stream.tell()
+        self.unk_ref_1 = stream.uint64(self.unk_ref_1)
+        self.bones_ref = stream.uint64(self.bones_ref)
+        self.composite_ref = stream.uint64(self.composite_ref)
+        self.unk_ref_2 = stream.uint64(self.unk_ref_2)
+        self.state_machine_ref = stream.uint64(self.state_machine_ref)
+        self.header_data_1 = stream.uint64(self.header_data_1)
+        self.unreversed_lod_group_list_data_offset = stream.uint32(self.unreversed_lod_group_list_data_offset)
+        self.transform_info_offset = stream.uint32(self.transform_info_offset)
+        self.light_list_offset = stream.uint32(self.light_list_offset)
+        self.unk_pre_light_list_offset = stream.uint32(self.unk_pre_light_list_offset)
+        self.wwise_callback_offset = stream.uint32(self.wwise_callback_offset)
+        self.header_data_2 = stream.bytes(self.header_data_2, 8)
+        self.customization_info_offset = stream.uint32(self.customization_info_offset)
+        self.unk_header_offset_1 = stream.uint32(self.unk_header_offset_1)
+        self.connecting_bone_hash_offset = stream.uint32(self.connecting_bone_hash_offset)
+        self.bone_info_offset = stream.uint32(self.bone_info_offset)
+        self.stream_info_offset = stream.uint32(self.stream_info_offset)
+        self.ending_offset = stream.uint32(self.ending_offset)
+        self.mesh_info_offset = stream.uint32(self.mesh_info_offset)
+        self.header_unk = stream.uint64(self.header_unk)
+        self.materials_offset = stream.uint32(self.materials_offset)
+        self.header_padding = stream.bytes(self.header_padding, 12)
+
+        data = bytes(stream.data)
+        for name in self.SECTION_ORDER:
+            self.section_blobs[name] = b""
+            self.section_owners[name] = name
+
+        offset_groups = {}
+        for name, offset in self._offset_map().items():
+            if offset > 0:
+                offset_groups.setdefault(offset, []).append(name)
+
+        ordered_offsets = sorted(offset_groups)
+        for index, offset in enumerate(ordered_offsets):
+            names = offset_groups[offset]
+            owner = names[-1]
+            next_offset = self.ending_offset
+            if index + 1 < len(ordered_offsets):
+                next_offset = ordered_offsets[index + 1]
+            blob_start = start + offset
+            blob_end = start + next_offset
+            self.section_blobs[owner] = data[blob_start:blob_end]
+            for name in names:
+                self.section_owners[name] = owner
+
+        ending_location = start + self.ending_offset
+        if ending_location + 8 <= len(data):
+            self.ending_bytes = int.from_bytes(data[ending_location:ending_location + 8], "little")
+            self.trailing_data = data[ending_location + 8:]
+        else:
+            self.ending_bytes = 0
+            self.trailing_data = b""
+
+        stream.seek(len(stream.data))
+
+    def save(self, stream: MemoryStream):
+        offsets = {}
+        location = self.HEADER_SIZE
+        for name in self.SECTION_ORDER:
+            if self.section_owners.get(name, name) != name:
+                continue
+            blob = self.section_blobs.get(name, b"")
+            if blob:
+                offsets[name] = location
+                location += len(blob)
+            else:
+                offsets[name] = 0
+
+        self.ending_offset = location
+
+        for name in self.SECTION_ORDER:
+            owner = self.section_owners.get(name, name)
+            self._set_offset(name, offsets.get(owner, 0))
+
+        self.unk_ref_1 = stream.uint64(self.unk_ref_1)
+        self.bones_ref = stream.uint64(self.bones_ref)
+        self.composite_ref = stream.uint64(self.composite_ref)
+        self.unk_ref_2 = stream.uint64(self.unk_ref_2)
+        self.state_machine_ref = stream.uint64(self.state_machine_ref)
+        self.header_data_1 = stream.uint64(self.header_data_1)
+        self.unreversed_lod_group_list_data_offset = stream.uint32(self.unreversed_lod_group_list_data_offset)
+        self.transform_info_offset = stream.uint32(self.transform_info_offset)
+        self.light_list_offset = stream.uint32(self.light_list_offset)
+        self.unk_pre_light_list_offset = stream.uint32(self.unk_pre_light_list_offset)
+        self.wwise_callback_offset = stream.uint32(self.wwise_callback_offset)
+        self.header_data_2 = stream.bytes(self.header_data_2, 8)
+        self.customization_info_offset = stream.uint32(self.customization_info_offset)
+        self.unk_header_offset_1 = stream.uint32(self.unk_header_offset_1)
+        self.connecting_bone_hash_offset = stream.uint32(self.connecting_bone_hash_offset)
+        self.bone_info_offset = stream.uint32(self.bone_info_offset)
+        self.stream_info_offset = stream.uint32(self.stream_info_offset)
+        self.ending_offset = stream.uint32(self.ending_offset)
+        self.mesh_info_offset = stream.uint32(self.mesh_info_offset)
+        self.header_unk = stream.uint64(self.header_unk)
+        self.materials_offset = stream.uint32(self.materials_offset)
+        self.header_padding = stream.bytes(self.header_padding, 12)
+
+        for name in self.SECTION_ORDER:
+            if self.section_owners.get(name, name) != name:
+                continue
+            blob = self.section_blobs.get(name, b"")
+            if blob:
+                stream.write(blob)
+
+        self.ending_bytes = stream.uint64(self.ending_bytes)
+        if self.trailing_data:
+            stream.write(self.trailing_data)

@@ -27,10 +27,12 @@ from .parsers import (
     StingrayParticles,
     StingrayStateMachine,
     StingrayTexture,
+    StingrayUnit,
 )
 from .slim import get_package_toc, is_slim_version, load_package, slim_init
 
 
+#region Module Helpers And Constants
 def log_message(log, message):
     if log is not None:
         log(message)
@@ -44,7 +46,18 @@ SUPPORTED_REBUILD_TYPES = {
     StateMachineID,
 }
 
+IDSWAP_PATCH_SECTION_OVERRIDES = (
+    "bone_info",
+    "stream_info",
+    "mesh_info",
+    "materials",
+    "customization_info",
+    "connecting_bone_hash",
+)
+#endregion Module Helpers And Constants
 
+
+#region Binary Data Models
 @dataclass
 class TocFileType:
     type_id: int = 0
@@ -62,6 +75,384 @@ class TocFileType:
         return self
 
 
+@dataclass(frozen=True)
+class UnitVertexComponent:
+    RECORD_SIZE = 20
+    type_id: int = 0
+    format_id: int = 0
+    index: int = 0
+    unknown: int = 0
+
+    def serialize(self, stream: MemoryStream):
+        return UnitVertexComponent(
+            type_id=stream.uint32(self.type_id),
+            format_id=stream.uint32(self.format_id),
+            index=stream.uint32(self.index),
+            unknown=stream.uint64(self.unknown),
+        )
+
+    @property
+    def key(self):
+        return (self.type_id, self.format_id, self.index)
+
+    @property
+    def size(self):
+        size_lut = {
+            0: 4,
+            2: 12,
+            4: 4,
+            20: 16,
+            24: 4,
+            25: 4,
+            26: 4,
+            29: 4,
+            31: 8,
+        }
+        if self.format_id not in size_lut:
+            raise ValueError(f"Unsupported Unit vertex format: {self.format_id}")
+        return size_lut[self.format_id]
+
+
+@dataclass(frozen=True)
+class UnitFingerprint:
+    file_id: int
+    bones_ref: int
+    composite_ref: int
+    state_machine_ref: int
+    mesh_ids: tuple[int, ...]
+    lod_indices: tuple[int, ...]
+    material_ids: tuple[int, ...]
+    stream_layouts: tuple[tuple[tuple[int, int, int], ...], ...]
+    section_sizes: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class UnitSimilarity:
+    score: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProbableIdSwap:
+    source_id: int
+    source_name: str
+    source_score: int
+    target_score: int
+    source_reasons: tuple[str, ...]
+    target_reasons: tuple[str, ...]
+
+
+@dataclass
+class UnitStreamInfo:
+    components: list[UnitVertexComponent]
+    component_info_id: int = 0
+    vertex_buffer_id: int = 0
+    vertex_buffer_unk1: int = 0
+    num_vertices: int = 0
+    vertex_stride: int = 0
+    vertex_buffer_unk2: int = 0
+    vertex_buffer_unk3: int = 0
+    index_buffer_id: int = 0
+    index_buffer_unk1: int = 0
+    num_indices: int = 0
+    index_buffer_type: int = 0
+    index_buffer_unk2: int = 0
+    index_buffer_unk3: int = 0
+    vertex_buffer_offset: int = 0
+    vertex_buffer_size: int = 0
+    index_buffer_offset: int = 0
+    index_buffer_size: int = 0
+    ending_bytes: bytes = b"\x00" * 16
+
+    @classmethod
+    def parse(cls, stream: MemoryStream):
+        component_info_id = stream.uint64(0)
+        component_area_offset = stream.tell()
+        stream.seek(component_area_offset + 320)
+        num_components = stream.uint64(0)
+        vertex_buffer_id = stream.uint64(0)
+        vertex_buffer_unk1 = stream.uint64(0)
+        num_vertices = stream.uint32(0)
+        vertex_stride = stream.uint32(0)
+        vertex_buffer_unk2 = stream.uint64(0)
+        vertex_buffer_unk3 = stream.uint64(0)
+        index_buffer_id = stream.uint64(0)
+        index_buffer_unk1 = stream.uint64(0)
+        num_indices = stream.uint32(0)
+        index_buffer_type = stream.uint32(0)
+        index_buffer_unk2 = stream.uint64(0)
+        index_buffer_unk3 = stream.uint64(0)
+        vertex_buffer_offset = stream.uint32(0)
+        vertex_buffer_size = stream.uint32(0)
+        index_buffer_offset = stream.uint32(0)
+        index_buffer_size = stream.uint32(0)
+        ending_bytes = bytes(stream.bytes(bytearray(16), 16))
+
+        record_end = ceil(float(stream.tell()) / 16) * 16
+        stream.seek(component_area_offset)
+        components = []
+        for _ in range(num_components):
+            component = UnitVertexComponent().serialize(stream)
+            components.append(component)
+        stream.seek(record_end)
+
+        return cls(
+            components=components,
+            component_info_id=component_info_id,
+            vertex_buffer_id=vertex_buffer_id,
+            vertex_buffer_unk1=vertex_buffer_unk1,
+            num_vertices=num_vertices,
+            vertex_stride=vertex_stride,
+            vertex_buffer_unk2=vertex_buffer_unk2,
+            vertex_buffer_unk3=vertex_buffer_unk3,
+            index_buffer_id=index_buffer_id,
+            index_buffer_unk1=index_buffer_unk1,
+            num_indices=num_indices,
+            index_buffer_type=index_buffer_type,
+            index_buffer_unk2=index_buffer_unk2,
+            index_buffer_unk3=index_buffer_unk3,
+            vertex_buffer_offset=vertex_buffer_offset,
+            vertex_buffer_size=vertex_buffer_size,
+            index_buffer_offset=index_buffer_offset,
+            index_buffer_size=index_buffer_size,
+            ending_bytes=ending_bytes,
+        )
+
+    def write(self, stream: MemoryStream):
+        stream.uint64(self.component_info_id)
+        for component in self.components:
+            stream.uint32(component.type_id)
+            stream.uint32(component.format_id)
+            stream.uint32(component.index)
+            stream.uint64(component.unknown)
+        component_bytes = len(self.components) * UnitVertexComponent.RECORD_SIZE
+        if component_bytes > 320:
+            raise ValueError("Unit stream contains too many vertex components")
+        stream.write(b"\x00" * (320 - component_bytes))
+        stream.uint64(len(self.components))
+        stream.uint64(self.vertex_buffer_id)
+        stream.uint64(self.vertex_buffer_unk1)
+        stream.uint32(self.num_vertices)
+        stream.uint32(self.vertex_stride)
+        stream.uint64(self.vertex_buffer_unk2)
+        stream.uint64(self.vertex_buffer_unk3)
+        stream.uint64(self.index_buffer_id)
+        stream.uint64(self.index_buffer_unk1)
+        stream.uint32(self.num_indices)
+        stream.uint32(self.index_buffer_type)
+        stream.uint64(self.index_buffer_unk2)
+        stream.uint64(self.index_buffer_unk3)
+        stream.uint32(self.vertex_buffer_offset)
+        stream.uint32(self.vertex_buffer_size)
+        stream.uint32(self.index_buffer_offset)
+        stream.uint32(self.index_buffer_size)
+        stream.write(self.ending_bytes[:16].ljust(16, b"\x00"))
+        aligned_end = ceil(float(stream.tell()) / 16) * 16
+        stream.seek(aligned_end)
+
+
+@dataclass
+class UnitStreamSection:
+    stream_infos: list[UnitStreamInfo]
+    stream_unk_ids: list[int]
+    stream_unk2: int = 0
+
+    @classmethod
+    def parse(cls, data: bytes):
+        stream = MemoryStream(data)
+        num_streams = stream.uint32(0)
+        offsets = [stream.uint32(0) for _ in range(num_streams)]
+        stream_unk_ids = [stream.uint32(0) for _ in range(num_streams)]
+        stream_unk2 = stream.uint32(0)
+        stream_infos = []
+        for offset in offsets:
+            stream.seek(offset)
+            stream_infos.append(UnitStreamInfo.parse(stream))
+        return cls(stream_infos=stream_infos, stream_unk_ids=stream_unk_ids, stream_unk2=stream_unk2)
+
+    def build(self):
+        stream = MemoryStream(io_mode="write")
+        stream.uint32(len(self.stream_infos))
+        offset_positions = [stream.tell() + (index * 4) for index in range(len(self.stream_infos))]
+        for _ in self.stream_infos:
+            stream.uint32(0)
+        for value in self.stream_unk_ids:
+            stream.uint32(value)
+        stream.uint32(self.stream_unk2)
+
+        record_offsets = []
+        for info in self.stream_infos:
+            record_offsets.append(stream.tell())
+            info.write(stream)
+
+        end_location = stream.tell()
+        for position, offset in zip(offset_positions, record_offsets):
+            stream.seek(position)
+            stream.uint32(offset)
+        stream.seek(end_location)
+        return bytes(stream.data)
+
+
+@dataclass
+class UnitMeshSectionInfo:
+    material_index: int = 0
+    vertex_offset: int = 0
+    num_vertices: int = 0
+    index_offset: int = 0
+    num_indices: int = 0
+    group_index: int = 0
+
+    @classmethod
+    def parse(cls, stream: MemoryStream):
+        return cls(
+            material_index=stream.uint32(0),
+            vertex_offset=stream.uint32(0),
+            num_vertices=stream.uint32(0),
+            index_offset=stream.uint32(0),
+            num_indices=stream.uint32(0),
+            group_index=stream.uint32(0),
+        )
+
+    def write(self, stream: MemoryStream):
+        stream.uint32(self.material_index)
+        stream.uint32(self.vertex_offset)
+        stream.uint32(self.num_vertices)
+        stream.uint32(self.index_offset)
+        stream.uint32(self.num_indices)
+        stream.uint32(self.group_index)
+
+
+@dataclass
+class UnitMeshInfo:
+    mesh_id: int = 0
+    lod_index: int = -1
+    stream_index: int = 0
+    transform_index: int = 0
+    unk1: int = 0
+    unk2: bytes = b"\x00" * 32
+    unk3: int = 0
+    unk4: int = 0
+    unk6: bytes = b"\x00" * 40
+    unk8: int = 0
+    material_ids: list[int] = None
+    sections: list[UnitMeshSectionInfo] = None
+
+    def __post_init__(self):
+        if self.material_ids is None:
+            self.material_ids = []
+        if self.sections is None:
+            self.sections = []
+
+    @classmethod
+    def parse(cls, stream: MemoryStream):
+        unk1 = stream.uint64(0)
+        unk2 = bytes(stream.bytes(bytearray(32), 32))
+        mesh_id = stream.uint32(0)
+        unk3 = stream.uint32(0)
+        transform_index = stream.uint32(0)
+        unk4 = stream.uint32(0)
+        lod_index = stream.int32(0)
+        stream_index = stream.uint32(0)
+        unk6 = bytes(stream.bytes(bytearray(40), 40))
+        num_materials = stream.uint32(0)
+        material_offset = stream.uint32(0)
+        unk8 = stream.uint64(0)
+        num_sections = stream.uint32(0)
+        sections_offset = stream.uint32(0)
+        material_ids = [stream.uint32(0) for _ in range(num_materials)]
+        sections = [UnitMeshSectionInfo.parse(stream) for _ in range(num_sections)]
+        return cls(
+            mesh_id=mesh_id,
+            lod_index=lod_index,
+            stream_index=stream_index,
+            transform_index=transform_index,
+            unk1=unk1,
+            unk2=unk2,
+            unk3=unk3,
+            unk4=unk4,
+            unk6=unk6,
+            unk8=unk8,
+            material_ids=material_ids,
+            sections=sections,
+        )
+
+    def write(self, stream: MemoryStream):
+        record_start = stream.tell()
+        stream.uint64(self.unk1)
+        stream.write(self.unk2[:32].ljust(32, b"\x00"))
+        stream.uint32(self.mesh_id)
+        stream.uint32(self.unk3)
+        stream.uint32(self.transform_index)
+        stream.uint32(self.unk4)
+        stream.int32(self.lod_index)
+        stream.uint32(self.stream_index)
+        stream.write(self.unk6[:40].ljust(40, b"\x00"))
+        num_materials = len(self.material_ids)
+        num_sections = len(self.sections)
+        stream.uint32(num_materials)
+        material_offset_location = stream.tell()
+        stream.uint32(0)
+        stream.uint64(self.unk8)
+        stream.uint32(num_sections)
+        sections_offset_location = stream.tell()
+        stream.uint32(0)
+
+        material_offset = stream.tell() - record_start
+        for material_id in self.material_ids:
+            stream.uint32(material_id)
+        sections_offset = stream.tell() - record_start
+        for section in self.sections:
+            section.write(stream)
+
+        record_end = stream.tell()
+        stream.seek(material_offset_location)
+        stream.uint32(material_offset)
+        stream.seek(sections_offset_location)
+        stream.uint32(sections_offset)
+        stream.seek(record_end)
+
+
+@dataclass
+class UnitMeshSection:
+    mesh_infos: list[UnitMeshInfo]
+    mesh_unk_ids: list[int]
+
+    @classmethod
+    def parse(cls, data: bytes):
+        stream = MemoryStream(data)
+        num_meshes = stream.uint32(0)
+        offsets = [stream.uint32(0) for _ in range(num_meshes)]
+        mesh_unk_ids = [stream.uint32(0) for _ in range(num_meshes)]
+        mesh_infos = []
+        for offset in offsets:
+            stream.seek(offset)
+            mesh_infos.append(UnitMeshInfo.parse(stream))
+        return cls(mesh_infos=mesh_infos, mesh_unk_ids=mesh_unk_ids)
+
+    def build(self):
+        stream = MemoryStream(io_mode="write")
+        stream.uint32(len(self.mesh_infos))
+        offset_positions = [stream.tell() + (index * 4) for index in range(len(self.mesh_infos))]
+        for _ in self.mesh_infos:
+            stream.uint32(0)
+        for value in self.mesh_unk_ids:
+            stream.uint32(value)
+
+        record_offsets = []
+        for info in self.mesh_infos:
+            record_offsets.append(stream.tell())
+            info.write(stream)
+
+        end_location = stream.tell()
+        for position, offset in zip(offset_positions, record_offsets):
+            stream.seek(position)
+            stream.uint32(offset)
+        stream.seek(end_location)
+        return bytes(stream.data)
+#endregion Binary Data Models
+
+
+#region Archive Containers And Indexing
 class TocEntry:
     def __init__(self):
         self.file_id = 0
@@ -295,6 +686,8 @@ class GameArchiveIndex:
     def __init__(self, game_data_folder: str):
         self.game_data_folder = game_data_folder
         self.search_archives = []
+        self.archive_cache = {}
+        self.unit_fingerprint_cache = {}
 
     def build(self):
         if self.search_archives:
@@ -332,7 +725,38 @@ class GameArchiveIndex:
                 return archive.path
         return None
 
+    def load_archive(self, archive_path: str):
+        archive = self.archive_cache.get(archive_path)
+        if archive is not None:
+            return archive
+        archive = StreamToc()
+        if not archive.from_file(str(archive_path)):
+            return None
+        self.archive_cache[archive_path] = archive
+        return archive
 
+    def iter_entries(self, type_id: int):
+        self.build()
+        seen = set()
+        for search_archive in self.search_archives:
+            entry_ids = sorted(search_archive.toc_entries.get(int(type_id), set()))
+            if not entry_ids:
+                continue
+            archive = self.load_archive(search_archive.path)
+            if archive is None:
+                continue
+            for file_id in entry_ids:
+                if file_id in seen:
+                    continue
+                entry = archive.get_entry(file_id, type_id)
+                if entry is None:
+                    continue
+                seen.add(file_id)
+                yield entry, f"game archive {Path(search_archive.path).name}"
+#endregion Archive Containers And Indexing
+
+
+#region Archive And Package Utilities
 def build_patch_template(default_archive: StreamToc, output_path: str):
     patch = StreamToc()
     patch.magic = default_archive.magic
@@ -488,8 +912,10 @@ def rebuild_entry_payload(entry):
         return bytes(toc.data), b"", b"", "rebuilt"
 
     return bytes(entry.toc_data), bytes(entry.gpu_data), bytes(entry.stream_data), "raw"
+#endregion Archive And Package Utilities
 
 
+#region Unit Analysis And ID Swap Matching
 def parse_unit_refs(entry):
     stream = MemoryStream(entry.toc_data)
     unk_ref1 = stream.uint64(0)
@@ -506,6 +932,23 @@ def parse_unit_refs(entry):
         "state_machine_ref": state_machine_ref,
         "header1": header1,
     }
+
+
+def is_probable_static_idswap_patch(broken_patch: StreamToc):
+    units = list(broken_patch.toc_dict.get(UnitID, {}).values())
+    if len(units) < 2:
+        return False
+    for unit_entry in units:
+        refs = parse_unit_refs(unit_entry)
+        if refs["bones_ref"] != 0:
+            return False
+        if refs["composite_ref"] != 0:
+            return False
+        if refs["state_machine_ref"] != 0:
+            return False
+        if refs["header1"] != 4294967298:
+            return False
+    return True
 
 
 def resolve_unit_source_entry(
@@ -527,12 +970,461 @@ def resolve_unit_source_entry(
     return None, None
 
 
+def extract_unit_stream_sections(unit: StingrayUnit):
+    stream_blob = unit.section_blobs.get("stream_info", b"")
+    if not stream_blob:
+        return None
+    return UnitStreamSection.parse(stream_blob)
+
+
+def extract_unit_mesh_sections(unit: StingrayUnit):
+    mesh_blob = unit.section_blobs.get("mesh_info", b"")
+    if not mesh_blob:
+        return None
+    return UnitMeshSection.parse(mesh_blob)
+
+
+def get_unit_fingerprint(entry):
+    unit = StingrayUnit()
+    unit.serialize(MemoryStream(entry.toc_data))
+
+    mesh_sections = extract_unit_mesh_sections(unit)
+    stream_sections = extract_unit_stream_sections(unit)
+
+    mesh_ids = ()
+    lod_indices = ()
+    material_ids = ()
+    if mesh_sections is not None:
+        mesh_ids = tuple(mesh.mesh_id for mesh in mesh_sections.mesh_infos)
+        lod_indices = tuple(mesh.lod_index for mesh in mesh_sections.mesh_infos)
+        material_ids = tuple(
+            material_id
+            for mesh in mesh_sections.mesh_infos
+            for material_id in mesh.material_ids
+        )
+
+    stream_layouts = ()
+    if stream_sections is not None:
+        stream_layouts = tuple(
+            tuple(component.key for component in info.components)
+            for info in stream_sections.stream_infos
+        )
+
+    section_sizes = tuple(
+        (name, len(unit.section_blobs.get(name, b"")))
+        for name in StingrayUnit.SECTION_ORDER
+    )
+
+    return UnitFingerprint(
+        file_id=int(entry.file_id),
+        bones_ref=int(unit.bones_ref),
+        composite_ref=int(unit.composite_ref),
+        state_machine_ref=int(unit.state_machine_ref),
+        mesh_ids=mesh_ids,
+        lod_indices=lod_indices,
+        material_ids=material_ids,
+        stream_layouts=stream_layouts,
+        section_sizes=section_sizes,
+    )
+
+
+def score_unit_similarity(base: UnitFingerprint, candidate: UnitFingerprint):
+    score = 0
+    reasons = []
+
+    if base.mesh_ids and candidate.mesh_ids:
+        if base.mesh_ids == candidate.mesh_ids:
+            score += 40
+            reasons.append("mesh_ids exact")
+        elif set(base.mesh_ids) == set(candidate.mesh_ids):
+            score += 28
+            reasons.append("mesh_ids set")
+        elif len(set(base.mesh_ids) & set(candidate.mesh_ids)) > 0:
+            overlap = len(set(base.mesh_ids) & set(candidate.mesh_ids))
+            score += min(18, overlap * 4)
+            reasons.append(f"mesh_ids overlap {overlap}")
+        if len(base.mesh_ids) == len(candidate.mesh_ids):
+            score += 8
+            reasons.append("mesh_count")
+
+    if base.stream_layouts and candidate.stream_layouts:
+        if base.stream_layouts == candidate.stream_layouts:
+            score += 28
+            reasons.append("stream_layouts exact")
+        else:
+            matching_layouts = sum(
+                1
+                for left, right in zip(base.stream_layouts, candidate.stream_layouts)
+                if left == right
+            )
+            if matching_layouts:
+                score += min(18, matching_layouts * 6)
+                reasons.append(f"stream_layouts overlap {matching_layouts}")
+        if len(base.stream_layouts) == len(candidate.stream_layouts):
+            score += 6
+            reasons.append("stream_count")
+
+    if base.material_ids and candidate.material_ids:
+        if base.material_ids == candidate.material_ids:
+            score += 16
+            reasons.append("material_ids exact")
+        elif set(base.material_ids) == set(candidate.material_ids):
+            score += 12
+            reasons.append("material_ids set")
+        elif len(set(base.material_ids) & set(candidate.material_ids)) > 0:
+            overlap = len(set(base.material_ids) & set(candidate.material_ids))
+            score += min(8, overlap * 2)
+            reasons.append(f"material_ids overlap {overlap}")
+
+    if base.lod_indices and candidate.lod_indices and base.lod_indices == candidate.lod_indices:
+        score += 8
+        reasons.append("lod_indices")
+
+    for label, left_value, right_value in (
+        ("bones_ref", base.bones_ref, candidate.bones_ref),
+        ("composite_ref", base.composite_ref, candidate.composite_ref),
+        ("state_machine_ref", base.state_machine_ref, candidate.state_machine_ref),
+    ):
+        if left_value != 0 and left_value == right_value:
+            score += 8
+            reasons.append(label)
+
+    matching_sections = sum(
+        1 for left, right in zip(base.section_sizes, candidate.section_sizes)
+        if left[1] != 0 and left[1] == right[1]
+    )
+    if matching_sections:
+        score += min(12, matching_sections * 2)
+        reasons.append(f"section_sizes {matching_sections}")
+
+    return UnitSimilarity(score=score, reasons=tuple(reasons))
+
+
+def get_cached_unit_fingerprint(entry, archive_index: GameArchiveIndex | None = None):
+    if archive_index is None:
+        return get_unit_fingerprint(entry)
+    cached = archive_index.unit_fingerprint_cache.get(int(entry.file_id))
+    if cached is not None:
+        return cached
+    fingerprint = get_unit_fingerprint(entry)
+    archive_index.unit_fingerprint_cache[int(entry.file_id)] = fingerprint
+    return fingerprint
+
+
+def resolve_archive_input_path(game_data_folder: str, archive_input: str):
+    archive_input = archive_input.strip()
+    if not archive_input:
+        return None
+
+    candidate = Path(archive_input)
+    if candidate.anchor:
+        return normalize_archive_selection(str(candidate))
+    return normalize_archive_selection(str(Path(game_data_folder) / archive_input))
+
+
+def resolve_archive_input_paths(game_data_folder: str, archive_input: str):
+    archive_paths = []
+    for token in archive_input.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        resolved = resolve_archive_input_path(game_data_folder, token)
+        if resolved is not None:
+            archive_paths.append(resolved)
+    return archive_paths
+
+
+def match_unit_to_source_archive(
+    entry,
+    source_archive: StreamToc,
+    source_fingerprints: dict[int, UnitFingerprint] | None = None,
+):
+    if entry.type_id != UnitID:
+        return None
+
+    if source_fingerprints is None:
+        source_fingerprints = {
+            int(candidate.file_id): get_unit_fingerprint(candidate)
+            for candidate in source_archive.toc_dict.get(UnitID, {}).values()
+        }
+
+    base_fingerprint = get_unit_fingerprint(entry)
+    best_entry = None
+    best_similarity = None
+
+    for candidate in source_archive.toc_dict.get(UnitID, {}).values():
+        similarity = score_unit_similarity(
+            base_fingerprint,
+            source_fingerprints[int(candidate.file_id)],
+        )
+        if best_similarity is None or similarity.score > best_similarity.score:
+            best_entry = candidate
+            best_similarity = similarity
+
+    if best_entry is None or best_similarity is None or best_similarity.score <= 0:
+        return None
+    return best_entry, best_similarity
+
+
+def match_unit_to_source_archives(
+    entry,
+    source_archives: list[dict],
+):
+    best_match = None
+    for source_info in source_archives:
+        match = match_unit_to_source_archive(
+            entry,
+            source_info["archive"],
+            source_fingerprints=source_info["fingerprints"],
+        )
+        if match is None:
+            continue
+        matched_entry, similarity = match
+        if best_match is None or similarity.score > best_match["similarity"].score:
+            best_match = {
+                "entry": matched_entry,
+                "similarity": similarity,
+                "name": source_info["name"],
+                "path": source_info["path"],
+            }
+    return best_match
+
+
+def detect_probable_id_swap(
+    entry,
+    default_archive: StreamToc,
+    archive_index: GameArchiveIndex | None = None,
+):
+    # Disabled for now.
+    #
+    # The first implementation scanned and loaded too much of the game data in order to
+    # score every Unit candidate, which is not safe to run by default on real user machines.
+    # We'll redesign this with a metadata-first approach before re-enabling automatic
+    # ID swap source inference.
+    return None
+#endregion Unit Analysis And ID Swap Matching
+
+
+#region Unit Repair And Rebuild
+def default_component_bytes(component: UnitVertexComponent):
+    if component.type_id == 5 and component.format_id == 4:
+        return b"\xFF\xFF\xFF\xFF"
+    if component.type_id == 7 and component.format_id == 31:
+        return b"\x00\x3C\x00\x00\x00\x00\x00\x00"
+    return b"\x00" * component.size
+
+
+def rebuild_vertex_buffer_for_layout(
+    old_buffer: bytes,
+    old_info: UnitStreamInfo,
+    target_components: list[UnitVertexComponent],
+):
+    old_stride = old_info.vertex_stride
+    if old_stride <= 0:
+        raise ValueError("Unit stream has invalid vertex stride")
+    expected_size = old_info.num_vertices * old_stride
+    if len(old_buffer) < expected_size:
+        raise ValueError("Unit vertex buffer is smaller than expected")
+
+    old_component_offsets = {}
+    running_offset = 0
+    for component in old_info.components:
+        old_component_offsets[component.key] = (running_offset, component.size)
+        running_offset += component.size
+    if running_offset != old_info.vertex_stride:
+        raise ValueError("Unit stream component sizes do not match vertex stride")
+
+    new_parts = []
+    for vertex_index in range(old_info.num_vertices):
+        vertex_start = vertex_index * old_stride
+        for component in target_components:
+            component_info = old_component_offsets.get(component.key)
+            if component_info is None:
+                if component.type_id in {0, 1, 6, 7}:
+                    raise ValueError(
+                        f"Missing critical vertex component {component.key} in stream layout"
+                    )
+                new_parts.append(default_component_bytes(component))
+                continue
+            component_offset, component_size = component_info
+            new_parts.append(
+                old_buffer[
+                    vertex_start + component_offset: vertex_start + component_offset + component_size
+                ]
+            )
+    return b"".join(new_parts)
+
+
+def repair_unit_stream_layout_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_streams = extract_unit_stream_sections(source_unit)
+    entry_streams = extract_unit_stream_sections(entry_unit)
+    if source_streams is None or entry_streams is None:
+        return False
+    if len(source_streams.stream_infos) != len(entry_streams.stream_infos):
+        return False
+
+    new_gpu = bytearray()
+    changed = False
+    rebuilt_infos = []
+
+    for stream_index, (source_info, entry_info) in enumerate(zip(source_streams.stream_infos, entry_streams.stream_infos)):
+        old_vertex_end = entry_info.vertex_buffer_offset + entry_info.vertex_buffer_size
+        old_index_end = entry_info.index_buffer_offset + entry_info.index_buffer_size
+        if old_vertex_end > len(entry.gpu_data) or old_index_end > len(entry.gpu_data):
+            return False
+
+        old_vertex_buffer = bytes(entry.gpu_data[entry_info.vertex_buffer_offset:old_vertex_end])
+        old_index_buffer = bytes(entry.gpu_data[entry_info.index_buffer_offset:old_index_end])
+
+        source_layout = [component.key for component in source_info.components]
+        entry_layout = [component.key for component in entry_info.components]
+        extra_entry_components = [
+            component for component in entry_info.components
+            if component.key not in source_layout
+        ]
+        target_components = list(source_info.components) + extra_entry_components
+        target_layout = [component.key for component in target_components]
+
+        if target_layout != entry_layout:
+            rebuilt_vertex_buffer = rebuild_vertex_buffer_for_layout(
+                old_vertex_buffer,
+                entry_info,
+                target_components,
+            )
+            changed = True
+            log_message(
+                log,
+                f"REPAIRED Unit stream layout {entry.file_id} stream {stream_index}: {entry_layout} -> {target_layout}",
+            )
+        else:
+            rebuilt_vertex_buffer = old_vertex_buffer
+
+        new_info = copy.deepcopy(entry_info)
+        new_info.components = list(target_components)
+        new_info.num_vertices = entry_info.num_vertices
+        new_info.num_indices = entry_info.num_indices
+        new_info.vertex_stride = sum(component.size for component in target_components)
+        new_info.vertex_buffer_offset = len(new_gpu)
+        new_info.vertex_buffer_size = len(rebuilt_vertex_buffer)
+        new_gpu.extend(rebuilt_vertex_buffer)
+        new_info.index_buffer_offset = len(new_gpu)
+        new_info.index_buffer_size = len(old_index_buffer)
+        new_gpu.extend(old_index_buffer)
+        rebuilt_infos.append(new_info)
+
+    if not changed:
+        return False
+
+    rebuilt_stream_section = copy.deepcopy(entry_streams)
+    rebuilt_stream_section.stream_infos = rebuilt_infos
+    if len(source_streams.stream_unk_ids) == len(rebuilt_stream_section.stream_unk_ids):
+        rebuilt_stream_section.stream_unk_ids = list(source_streams.stream_unk_ids)
+
+    entry_unit.section_blobs["stream_info"] = rebuilt_stream_section.build()
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    entry.gpu_data = bytes(new_gpu)
+    return True
+
+
+def repair_unit_mesh_order_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_meshes = extract_unit_mesh_sections(source_unit)
+    entry_meshes = extract_unit_mesh_sections(entry_unit)
+    if source_meshes is None or entry_meshes is None:
+        return False
+    if len(source_meshes.mesh_infos) != len(entry_meshes.mesh_infos):
+        return False
+
+    source_ids = [mesh.mesh_id for mesh in source_meshes.mesh_infos]
+    entry_by_id = {mesh.mesh_id: mesh for mesh in entry_meshes.mesh_infos}
+    if set(source_ids) != set(entry_by_id):
+        return False
+
+    changed = False
+    reordered_infos = []
+    for source_mesh in source_meshes.mesh_infos:
+        entry_mesh = copy.deepcopy(entry_by_id[source_mesh.mesh_id])
+        if (
+            entry_mesh.transform_index != source_mesh.transform_index
+            or entry_mesh.stream_index != source_mesh.stream_index
+            or entry_mesh.lod_index != source_mesh.lod_index
+        ):
+            changed = True
+        entry_mesh.transform_index = source_mesh.transform_index
+        entry_mesh.stream_index = source_mesh.stream_index
+        entry_mesh.lod_index = source_mesh.lod_index
+        reordered_infos.append(entry_mesh)
+
+    if [mesh.mesh_id for mesh in entry_meshes.mesh_infos] != source_ids:
+        changed = True
+
+    if not changed:
+        return False
+
+    entry_meshes.mesh_infos = reordered_infos
+    entry_meshes.mesh_unk_ids = [mesh.mesh_id for mesh in reordered_infos]
+    entry_unit.section_blobs["mesh_info"] = entry_meshes.build()
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(log, f"REORDERED Unit mesh info from source layout: {entry.file_id}")
+    return True
+
+
+def repair_unit_lod_group_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_blob = source_unit.section_blobs.get("lod_group_list", b"")
+    entry_blob = entry_unit.section_blobs.get("lod_group_list", b"")
+    if not source_blob or source_blob == entry_blob:
+        return False
+
+    entry_unit.section_blobs["lod_group_list"] = bytes(source_blob)
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(log, f"REPLACED Unit lod_group_list from source: {entry.file_id}")
+    return True
+
+
 def normalize_unit_entry_from_source(
     entry,
     default_archive: StreamToc,
     archive_index: GameArchiveIndex | None = None,
     log=None,
+    header_only: bool = False,
 ):
+    probable_id_swap = detect_probable_id_swap(
+        entry,
+        default_archive,
+        archive_index=archive_index,
+    )
     source_entry, source_name = resolve_unit_source_entry(
         entry.file_id,
         default_archive,
@@ -543,12 +1435,102 @@ def normalize_unit_entry_from_source(
     if len(entry.toc_data) < 88 or len(source_entry.toc_data) < 88:
         return False
 
-    normalized = bytearray(entry.toc_data)
-    source_toc = bytes(source_entry.toc_data)
-    normalized[40:88] = source_toc[40:88]
-    entry.toc_data = bytes(normalized)
-    log_message(log, f"NORMALIZED Unit structural segment 40..88 from {source_name}: {entry.file_id}")
-    return True
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+
+    repaired_layout = False
+    if header_only:
+        log_message(
+            log,
+            f"Using header-only Unit normalization for {entry.file_id}: preserving mesh/lod/material ordering.",
+        )
+    elif probable_id_swap is not None:
+        log_message(
+            log,
+            "PROBABLE ID SWAP detected for "
+            f"{entry.file_id}: probable source {probable_id_swap.source_id} from "
+            f"{probable_id_swap.source_name} "
+            f"(score {probable_id_swap.source_score} vs target {probable_id_swap.target_score})",
+        )
+        if probable_id_swap.source_reasons:
+            log_message(
+                log,
+                f"ID swap source match reasons for {entry.file_id}: {', '.join(probable_id_swap.source_reasons)}",
+            )
+        if probable_id_swap.target_reasons:
+            log_message(
+                log,
+                f"Target match reasons for {entry.file_id}: {', '.join(probable_id_swap.target_reasons)}",
+            )
+        log_message(
+            log,
+            f"Using ID swap safe mode for {entry.file_id}: preserving patch geometry layout and skipping target LOD/mesh coercion.",
+        )
+    else:
+        try:
+            repaired_layout = repair_unit_stream_layout_from_source(entry, source_entry, log=log)
+        except Exception as exc:
+            log_message(log, f"FAILED Unit stream layout repair for {entry.file_id}: {exc}")
+        try:
+            repaired_layout = repair_unit_mesh_order_from_source(entry, source_entry, log=log) or repaired_layout
+        except Exception as exc:
+            log_message(log, f"FAILED Unit mesh order repair for {entry.file_id}: {exc}")
+        try:
+            repaired_layout = repair_unit_lod_group_from_source(entry, source_entry, log=log) or repaired_layout
+        except Exception as exc:
+            log_message(log, f"FAILED Unit LOD group repair for {entry.file_id}: {exc}")
+
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+    old_header = entry_unit.header_data_1
+    entry_unit.header_data_1 = source_unit.header_data_1
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(
+        log,
+        f"NORMALIZED Unit header_data_1 from {source_name}: {entry.file_id} ({old_header} -> {entry_unit.header_data_1})",
+    )
+    return repaired_layout or True
+
+
+def rebuild_idswap_unit_from_source_archive(
+    entry,
+    source_entry,
+    source_name: str,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    patch_unit = StingrayUnit()
+    patch_unit.serialize(MemoryStream(entry.toc_data))
+
+    preserved_sections = []
+    for section_name in IDSWAP_PATCH_SECTION_OVERRIDES:
+        patch_blob = patch_unit.section_blobs.get(section_name, b"")
+        if not patch_blob:
+            continue
+        source_unit.section_blobs[section_name] = bytes(patch_blob)
+        preserved_sections.append(section_name)
+
+    toc = MemoryStream(io_mode="write")
+    source_unit.serialize(toc)
+
+    new_entry = source_entry.clone()
+    new_entry.file_id = entry.file_id
+    new_entry.toc_data = bytes(toc.data)
+    new_entry.gpu_data = bytes(entry.gpu_data) if entry.gpu_data else bytes(source_entry.gpu_data)
+    new_entry.stream_data = (
+        bytes(entry.stream_data) if entry.stream_data else bytes(source_entry.stream_data)
+    )
+
+    preserved_text = ", ".join(preserved_sections) if preserved_sections else "no patch sections"
+    log_message(
+        log,
+        f"IDSWAP source rebuild for Unit {entry.file_id} from {source_name} entry "
+        f"{source_entry.file_id}; preserved {preserved_text}",
+    )
+    return new_entry, "idswap-source"
 
 
 def build_entry_from_source(
@@ -557,14 +1539,37 @@ def build_entry_from_source(
     default_archive: StreamToc,
     archive_index: GameArchiveIndex | None = None,
     log=None,
+    unit_header_only: bool = False,
+    unit_passthrough: bool = False,
 ):
     mode = "raw"
+    if unit_passthrough and entry.type_id == UnitID:
+        return entry.clone(), "raw-preserve"
+
     if entry.type_id in SUPPORTED_REBUILD_TYPES:
-        toc_data, gpu_data, stream_data, mode = rebuild_entry_payload(entry)
-        new_entry = entry.clone()
-        new_entry.toc_data = toc_data
-        new_entry.gpu_data = gpu_data
-        new_entry.stream_data = stream_data
+        try:
+            toc_data, gpu_data, stream_data, mode = rebuild_entry_payload(entry)
+            new_entry = entry.clone()
+            new_entry.toc_data = toc_data
+            new_entry.gpu_data = gpu_data
+            new_entry.stream_data = stream_data
+        except Exception as exc:
+            if not raw_fallback_for_unsupported:
+                raise
+            new_entry = entry.clone()
+            mode = "raw-fallback"
+            log_message(
+                log,
+                f"REBUILD FAILED for {TYPE_NAME_MAP.get(entry.type_id, entry.type_id)} {entry.file_id}: {exc}",
+            )
+            if entry.type_id == UnitID:
+                normalize_unit_entry_from_source(
+                    new_entry,
+                    default_archive,
+                    archive_index=archive_index,
+                    log=log,
+                    header_only=unit_header_only,
+                )
     elif raw_fallback_for_unsupported:
         new_entry = entry.clone()
         mode = "raw-fallback"
@@ -574,12 +1579,15 @@ def build_entry_from_source(
                 default_archive,
                 archive_index=archive_index,
                 log=log,
+                header_only=unit_header_only,
             )
     else:
         return None, None
     return new_entry, mode
+#endregion Unit Repair And Rebuild
 
 
+#region Dependency Resolution
 def resolve_dependency_entry(
     file_id,
     type_id,
@@ -630,17 +1638,27 @@ def add_unit_dependencies(
             if fixed_patch.get_entry(ref_id, type_id) is not None:
                 continue
 
-            source_entry, source_name = resolve_dependency_entry(
-                ref_id,
-                type_id,
-                broken_patch,
-                default_archive,
-                archive_index=archive_index,
-            )
+            source_entry = broken_patch.get_entry(ref_id, type_id)
             if source_entry is None:
-                unresolved.append((unit_entry.file_id, label, ref_id))
-                log_message(log, f"UNRESOLVED dependency for unit {unit_entry.file_id}: {label} {ref_id}")
+                external_entry, external_name = resolve_dependency_entry(
+                    ref_id,
+                    type_id,
+                    StreamToc(),
+                    default_archive,
+                    archive_index=archive_index,
+                )
+                if external_entry is None:
+                    unresolved.append((unit_entry.file_id, label, ref_id))
+                    log_message(log, f"UNRESOLVED dependency for unit {unit_entry.file_id}: {label} {ref_id}")
+                else:
+                    log_message(
+                        log,
+                        f"LEAVING external {label} dependency unresolved in patch for unit {unit_entry.file_id}: "
+                        f"{ref_id} from {external_name}",
+                    )
                 continue
+
+            source_name = "broken patch"
 
             new_entry, mode = build_entry_from_source(
                 source_entry,
@@ -661,7 +1679,11 @@ def add_unit_dependencies(
     return unresolved
 
 
-def validate_unit_dependencies(fixed_patch: StreamToc):
+def validate_unit_dependencies(
+    fixed_patch: StreamToc,
+    default_archive: StreamToc | None = None,
+    archive_index: GameArchiveIndex | None = None,
+):
     unresolved = []
     dependency_specs = [
         ("bones_ref", BoneID, "Bones"),
@@ -674,11 +1696,18 @@ def validate_unit_dependencies(fixed_patch: StreamToc):
             ref_id = refs[ref_name]
             if ref_id == 0:
                 continue
-            if fixed_patch.get_entry(ref_id, type_id) is None:
-                unresolved.append((unit_entry.file_id, label, ref_id))
+            if fixed_patch.get_entry(ref_id, type_id) is not None:
+                continue
+            if default_archive is not None and default_archive.get_entry(ref_id, type_id) is not None:
+                continue
+            if archive_index is not None and archive_index.find_archive_path(ref_id, type_id) is not None:
+                continue
+            unresolved.append((unit_entry.file_id, label, ref_id))
     return unresolved
+#endregion Dependency Resolution
 
 
+#region Public Fix Workflows
 def create_fixed_patch(
     game_data_folder: str,
     broken_patch_path: str,
@@ -688,6 +1717,7 @@ def create_fixed_patch(
     raw_fallback_for_unsupported: bool = False,
     auto_include_unit_dependencies: bool = True,
     output_patch_path: str | None = None,
+    idswap_source_archive: str | None = None,
     log=None,
 ):
     broken_patch_path = normalize_archive_selection(broken_patch_path)
@@ -712,6 +1742,66 @@ def create_fixed_patch(
     if not broken_patch.from_file(broken_patch_path):
         raise ValueError("Failed to load the selected broken patch.")
 
+    idswap_source_archives = []
+    idswap_source_name = None
+    idswap_source_matches = {}
+    if idswap_source_archive:
+        idswap_source_paths = resolve_archive_input_paths(game_data_folder, idswap_source_archive)
+        if not idswap_source_paths:
+            raise ValueError("No valid ID swap source archive IDs were provided.")
+        for idswap_source_path in idswap_source_paths:
+            source_name = f"game archive {Path(idswap_source_path).name}"
+            log_message(log, f"Loading ID swap source archive: {idswap_source_path}")
+            source_archive = StreamToc()
+            if not source_archive.from_file(str(idswap_source_path)):
+                raise ValueError(
+                    f"Failed to load the selected ID swap source archive: {idswap_source_path}"
+                )
+            idswap_source_archives.append(
+                {
+                    "path": idswap_source_path,
+                    "name": source_name,
+                    "archive": source_archive,
+                    "fingerprints": {
+                        int(candidate.file_id): get_unit_fingerprint(candidate)
+                        for candidate in source_archive.toc_dict.get(UnitID, {}).values()
+                    },
+                }
+            )
+
+        idswap_source_name = ", ".join(source_info["name"] for source_info in idswap_source_archives)
+        for unit_entry in broken_patch.toc_dict.get(UnitID, {}).values():
+            match = match_unit_to_source_archives(
+                unit_entry,
+                idswap_source_archives,
+            )
+            if match is None:
+                log_message(log, f"IDSWAP source match not found for Unit {unit_entry.file_id}")
+                continue
+            matched_entry = match["entry"]
+            matched_similarity = match["similarity"]
+            matched_source_name = match["name"]
+            idswap_source_matches[int(unit_entry.file_id)] = {
+                "entry": matched_entry,
+                "name": matched_source_name,
+            }
+            confidence = "low confidence" if matched_similarity.score < 50 else "matched"
+            log_message(
+                log,
+                f"IDSWAP source {confidence} for Unit {unit_entry.file_id}: "
+                f"{matched_entry.file_id} from {matched_source_name} "
+                f"(score {matched_similarity.score}; {', '.join(matched_similarity.reasons)})",
+            )
+
+    unit_passthrough_mode = bool(not idswap_source_archives and is_probable_static_idswap_patch(broken_patch))
+    unit_header_only_mode = False
+    full_passthrough_mode = unit_passthrough_mode
+    if unit_passthrough_mode:
+        log_message(
+            log,
+            "Detected static ID swap patch style: preserving patch entries exactly as they are and skipping payload normalization/rebuild.",
+        )
+
     patch_index = detect_patch_index_from_name(broken_patch_path)
     output_path = output_patch_path or resolve_output_path(export_dir, patch_index)
     fixed_patch = build_patch_template(default_archive, output_path)
@@ -729,13 +1819,25 @@ def create_fixed_patch(
             continue
 
         for entry in entries.values():
-            new_entry, mode = build_entry_from_source(
-                entry,
-                raw_fallback_for_unsupported=raw_fallback_for_unsupported,
-                default_archive=default_archive,
-                archive_index=archive_index,
-                log=log,
-            )
+            if full_passthrough_mode:
+                new_entry, mode = entry.clone(), "raw-preserve"
+            elif entry.type_id == UnitID and int(entry.file_id) in idswap_source_matches:
+                new_entry, mode = rebuild_idswap_unit_from_source_archive(
+                    entry,
+                    idswap_source_matches[int(entry.file_id)]["entry"],
+                    idswap_source_matches[int(entry.file_id)]["name"],
+                    log=log,
+                )
+            else:
+                new_entry, mode = build_entry_from_source(
+                    entry,
+                    raw_fallback_for_unsupported=raw_fallback_for_unsupported,
+                    default_archive=default_archive,
+                    archive_index=archive_index,
+                    log=log,
+                    unit_header_only=unit_header_only_mode,
+                    unit_passthrough=unit_passthrough_mode,
+                )
             if new_entry is None:
                 skipped_entries += 1
                 log_message(log, f"Skipping unsupported type without raw fallback: {label} entry {entry.file_id}")
@@ -758,7 +1860,11 @@ def create_fixed_patch(
             log=log,
         )
 
-    unresolved_after_build = validate_unit_dependencies(fixed_patch)
+    unresolved_after_build = validate_unit_dependencies(
+        fixed_patch,
+        default_archive=default_archive,
+        archive_index=archive_index,
+    )
     if unresolved_after_build:
         lines = [
             f"Unit {unit_id} is missing {label} dependency {ref_id}"
@@ -790,6 +1896,7 @@ def create_fixed_mod_archive(
     keep_unknown_types: bool = True,
     raw_fallback_for_unsupported: bool = False,
     auto_include_unit_dependencies: bool = True,
+    idswap_source_archive: str | None = None,
     log=None,
 ):
     if not Path(game_data_folder).is_dir():
@@ -828,6 +1935,7 @@ def create_fixed_mod_archive(
                 raw_fallback_for_unsupported=raw_fallback_for_unsupported,
                 auto_include_unit_dependencies=auto_include_unit_dependencies,
                 output_patch_path=patch_path,
+                idswap_source_archive=idswap_source_archive,
                 log=log,
             )
             fixed_patch_results.append(
@@ -848,3 +1956,4 @@ def create_fixed_mod_archive(
         "patch_results": fixed_patch_results,
         "incomplete_patch_groups": incomplete_groups,
     }
+#endregion Public Fix Workflows

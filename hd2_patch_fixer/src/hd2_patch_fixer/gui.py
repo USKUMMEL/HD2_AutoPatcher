@@ -46,6 +46,7 @@ class PatchFixerApp:
         self.root.configure(bg=BG_APP)
 
         self.game_path_var = tk.StringVar()
+        self.idswap_source_archive_var = tk.StringVar()
         self.patch_path_var = tk.StringVar()
         self.patch_export_path_var = tk.StringVar()
         self.mod_archive_path_var = tk.StringVar()
@@ -189,6 +190,15 @@ class PatchFixerApp:
             "Game Data Folder",
             self.game_path_var,
             lambda: self._choose_directory(self.game_path_var),
+        )
+        self._build_text_picker(
+            container,
+            "ID Swap Source Archive(s) (optional)",
+            self.idswap_source_archive_var,
+            hint_text=(
+                "Enter one or more source archive hex IDs like 88ccc33c4cca4d20. "
+                "If you need multiple, separate them with commas. Leave empty for normal mods."
+            ),
         )
 
         self.mode_notebook = ttk.Notebook(container)
@@ -364,6 +374,26 @@ class PatchFixerApp:
 
         ttk.Button(row, text="Browse", command=browse_command).pack(side="left", padx=(8, 0))
 
+    def _build_text_picker(self, parent, label, variable, hint_text=None):
+        frame = ttk.LabelFrame(parent, text=label)
+        frame.pack(fill="x", pady=4)
+
+        row = ttk.Frame(frame, style="Root.TFrame")
+        row.pack(fill="x")
+
+        entry = ttk.Entry(row, textvariable=variable)
+        entry.pack(side="left", fill="x", expand=True)
+
+        if hint_text:
+            hint = ttk.Label(
+                frame,
+                text=hint_text,
+                style="Body.TLabel",
+                wraplength=860,
+                justify="left",
+            )
+            hint.pack(anchor="w", pady=(8, 0))
+
     def _choose_directory(self, variable):
         selected = filedialog.askdirectory()
         if selected:
@@ -483,6 +513,7 @@ class PatchFixerApp:
             return {
                 "mode": mode,
                 "game_dir": game_dir,
+                "idswap_source_archive": self.idswap_source_archive_var.get().strip(),
                 "patch_path": normalize_archive_selection(patch_path),
                 "export_dir": export_dir,
                 "keep_type_ids": keep_type_ids,
@@ -497,6 +528,7 @@ class PatchFixerApp:
         return {
             "mode": mode,
             "game_dir": game_dir,
+            "idswap_source_archive": self.idswap_source_archive_var.get().strip(),
             "archive_path": archive_path,
             "export_zip": export_zip,
             "keep_type_ids": keep_type_ids,
@@ -539,6 +571,7 @@ class PatchFixerApp:
                     keep_type_ids=job["keep_type_ids"],
                     keep_unknown_types=self.keep_unknown_var.get(),
                     raw_fallback_for_unsupported=self.raw_fallback_var.get(),
+                    idswap_source_archive=job["idswap_source_archive"],
                     log=lambda message: self.log_queue.put(("log", message)),
                 )
                 result["mode"] = "single_patch"
@@ -550,6 +583,7 @@ class PatchFixerApp:
                     keep_type_ids=job["keep_type_ids"],
                     keep_unknown_types=self.keep_unknown_var.get(),
                     raw_fallback_for_unsupported=self.raw_fallback_var.get(),
+                    idswap_source_archive=job["idswap_source_archive"],
                     log=lambda message: self.log_queue.put(("log", message)),
                 )
                 result["mode"] = "compressed_mods"

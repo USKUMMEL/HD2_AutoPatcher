@@ -45,6 +45,15 @@ SUPPORTED_REBUILD_TYPES = {
     StateMachineID,
 }
 
+IDSWAP_PATCH_SECTION_OVERRIDES = (
+    "bone_info",
+    "stream_info",
+    "mesh_info",
+    "materials",
+    "customization_info",
+    "connecting_bone_hash",
+)
+
 
 @dataclass
 class TocFileType:
@@ -99,6 +108,35 @@ class UnitVertexComponent:
         if self.format_id not in size_lut:
             raise ValueError(f"Unsupported Unit vertex format: {self.format_id}")
         return size_lut[self.format_id]
+
+
+@dataclass(frozen=True)
+class UnitFingerprint:
+    file_id: int
+    bones_ref: int
+    composite_ref: int
+    state_machine_ref: int
+    mesh_ids: tuple[int, ...]
+    lod_indices: tuple[int, ...]
+    material_ids: tuple[int, ...]
+    stream_layouts: tuple[tuple[tuple[int, int, int], ...], ...]
+    section_sizes: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class UnitSimilarity:
+    score: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProbableIdSwap:
+    source_id: int
+    source_name: str
+    source_score: int
+    target_score: int
+    source_reasons: tuple[str, ...]
+    target_reasons: tuple[str, ...]
 
 
 @dataclass
@@ -643,6 +681,8 @@ class GameArchiveIndex:
     def __init__(self, game_data_folder: str):
         self.game_data_folder = game_data_folder
         self.search_archives = []
+        self.archive_cache = {}
+        self.unit_fingerprint_cache = {}
 
     def build(self):
         if self.search_archives:
@@ -679,6 +719,35 @@ class GameArchiveIndex:
             if archive.has_entry(file_id, type_id):
                 return archive.path
         return None
+
+    def load_archive(self, archive_path: str):
+        archive = self.archive_cache.get(archive_path)
+        if archive is not None:
+            return archive
+        archive = StreamToc()
+        if not archive.from_file(str(archive_path)):
+            return None
+        self.archive_cache[archive_path] = archive
+        return archive
+
+    def iter_entries(self, type_id: int):
+        self.build()
+        seen = set()
+        for search_archive in self.search_archives:
+            entry_ids = sorted(search_archive.toc_entries.get(int(type_id), set()))
+            if not entry_ids:
+                continue
+            archive = self.load_archive(search_archive.path)
+            if archive is None:
+                continue
+            for file_id in entry_ids:
+                if file_id in seen:
+                    continue
+                entry = archive.get_entry(file_id, type_id)
+                if entry is None:
+                    continue
+                seen.add(file_id)
+                yield entry, f"game archive {Path(search_archive.path).name}"
 
 
 def build_patch_template(default_archive: StreamToc, output_path: str):
@@ -856,6 +925,23 @@ def parse_unit_refs(entry):
     }
 
 
+def is_probable_static_idswap_patch(broken_patch: StreamToc):
+    units = list(broken_patch.toc_dict.get(UnitID, {}).values())
+    if len(units) < 2:
+        return False
+    for unit_entry in units:
+        refs = parse_unit_refs(unit_entry)
+        if refs["bones_ref"] != 0:
+            return False
+        if refs["composite_ref"] != 0:
+            return False
+        if refs["state_machine_ref"] != 0:
+            return False
+        if refs["header1"] != 4294967298:
+            return False
+    return True
+
+
 def resolve_unit_source_entry(
     unit_id: int,
     default_archive: StreamToc,
@@ -887,6 +973,226 @@ def extract_unit_mesh_sections(unit: StingrayUnit):
     if not mesh_blob:
         return None
     return UnitMeshSection.parse(mesh_blob)
+
+
+def get_unit_fingerprint(entry):
+    unit = StingrayUnit()
+    unit.serialize(MemoryStream(entry.toc_data))
+
+    mesh_sections = extract_unit_mesh_sections(unit)
+    stream_sections = extract_unit_stream_sections(unit)
+
+    mesh_ids = ()
+    lod_indices = ()
+    material_ids = ()
+    if mesh_sections is not None:
+        mesh_ids = tuple(mesh.mesh_id for mesh in mesh_sections.mesh_infos)
+        lod_indices = tuple(mesh.lod_index for mesh in mesh_sections.mesh_infos)
+        material_ids = tuple(
+            material_id
+            for mesh in mesh_sections.mesh_infos
+            for material_id in mesh.material_ids
+        )
+
+    stream_layouts = ()
+    if stream_sections is not None:
+        stream_layouts = tuple(
+            tuple(component.key for component in info.components)
+            for info in stream_sections.stream_infos
+        )
+
+    section_sizes = tuple(
+        (name, len(unit.section_blobs.get(name, b"")))
+        for name in StingrayUnit.SECTION_ORDER
+    )
+
+    return UnitFingerprint(
+        file_id=int(entry.file_id),
+        bones_ref=int(unit.bones_ref),
+        composite_ref=int(unit.composite_ref),
+        state_machine_ref=int(unit.state_machine_ref),
+        mesh_ids=mesh_ids,
+        lod_indices=lod_indices,
+        material_ids=material_ids,
+        stream_layouts=stream_layouts,
+        section_sizes=section_sizes,
+    )
+
+
+def score_unit_similarity(base: UnitFingerprint, candidate: UnitFingerprint):
+    score = 0
+    reasons = []
+
+    if base.mesh_ids and candidate.mesh_ids:
+        if base.mesh_ids == candidate.mesh_ids:
+            score += 40
+            reasons.append("mesh_ids exact")
+        elif set(base.mesh_ids) == set(candidate.mesh_ids):
+            score += 28
+            reasons.append("mesh_ids set")
+        elif len(set(base.mesh_ids) & set(candidate.mesh_ids)) > 0:
+            overlap = len(set(base.mesh_ids) & set(candidate.mesh_ids))
+            score += min(18, overlap * 4)
+            reasons.append(f"mesh_ids overlap {overlap}")
+        if len(base.mesh_ids) == len(candidate.mesh_ids):
+            score += 8
+            reasons.append("mesh_count")
+
+    if base.stream_layouts and candidate.stream_layouts:
+        if base.stream_layouts == candidate.stream_layouts:
+            score += 28
+            reasons.append("stream_layouts exact")
+        else:
+            matching_layouts = sum(
+                1
+                for left, right in zip(base.stream_layouts, candidate.stream_layouts)
+                if left == right
+            )
+            if matching_layouts:
+                score += min(18, matching_layouts * 6)
+                reasons.append(f"stream_layouts overlap {matching_layouts}")
+        if len(base.stream_layouts) == len(candidate.stream_layouts):
+            score += 6
+            reasons.append("stream_count")
+
+    if base.material_ids and candidate.material_ids:
+        if base.material_ids == candidate.material_ids:
+            score += 16
+            reasons.append("material_ids exact")
+        elif set(base.material_ids) == set(candidate.material_ids):
+            score += 12
+            reasons.append("material_ids set")
+        elif len(set(base.material_ids) & set(candidate.material_ids)) > 0:
+            overlap = len(set(base.material_ids) & set(candidate.material_ids))
+            score += min(8, overlap * 2)
+            reasons.append(f"material_ids overlap {overlap}")
+
+    if base.lod_indices and candidate.lod_indices and base.lod_indices == candidate.lod_indices:
+        score += 8
+        reasons.append("lod_indices")
+
+    for label, left_value, right_value in (
+        ("bones_ref", base.bones_ref, candidate.bones_ref),
+        ("composite_ref", base.composite_ref, candidate.composite_ref),
+        ("state_machine_ref", base.state_machine_ref, candidate.state_machine_ref),
+    ):
+        if left_value != 0 and left_value == right_value:
+            score += 8
+            reasons.append(label)
+
+    matching_sections = sum(
+        1 for left, right in zip(base.section_sizes, candidate.section_sizes)
+        if left[1] != 0 and left[1] == right[1]
+    )
+    if matching_sections:
+        score += min(12, matching_sections * 2)
+        reasons.append(f"section_sizes {matching_sections}")
+
+    return UnitSimilarity(score=score, reasons=tuple(reasons))
+
+
+def get_cached_unit_fingerprint(entry, archive_index: GameArchiveIndex | None = None):
+    if archive_index is None:
+        return get_unit_fingerprint(entry)
+    cached = archive_index.unit_fingerprint_cache.get(int(entry.file_id))
+    if cached is not None:
+        return cached
+    fingerprint = get_unit_fingerprint(entry)
+    archive_index.unit_fingerprint_cache[int(entry.file_id)] = fingerprint
+    return fingerprint
+
+
+def resolve_archive_input_path(game_data_folder: str, archive_input: str):
+    archive_input = archive_input.strip()
+    if not archive_input:
+        return None
+
+    candidate = Path(archive_input)
+    if candidate.anchor:
+        return normalize_archive_selection(str(candidate))
+    return normalize_archive_selection(str(Path(game_data_folder) / archive_input))
+
+
+def resolve_archive_input_paths(game_data_folder: str, archive_input: str):
+    archive_paths = []
+    for token in archive_input.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        resolved = resolve_archive_input_path(game_data_folder, token)
+        if resolved is not None:
+            archive_paths.append(resolved)
+    return archive_paths
+
+
+def match_unit_to_source_archive(
+    entry,
+    source_archive: StreamToc,
+    source_fingerprints: dict[int, UnitFingerprint] | None = None,
+):
+    if entry.type_id != UnitID:
+        return None
+
+    if source_fingerprints is None:
+        source_fingerprints = {
+            int(candidate.file_id): get_unit_fingerprint(candidate)
+            for candidate in source_archive.toc_dict.get(UnitID, {}).values()
+        }
+
+    base_fingerprint = get_unit_fingerprint(entry)
+    best_entry = None
+    best_similarity = None
+
+    for candidate in source_archive.toc_dict.get(UnitID, {}).values():
+        similarity = score_unit_similarity(
+            base_fingerprint,
+            source_fingerprints[int(candidate.file_id)],
+        )
+        if best_similarity is None or similarity.score > best_similarity.score:
+            best_entry = candidate
+            best_similarity = similarity
+
+    if best_entry is None or best_similarity is None or best_similarity.score <= 0:
+        return None
+    return best_entry, best_similarity
+
+
+def match_unit_to_source_archives(
+    entry,
+    source_archives: list[dict],
+):
+    best_match = None
+    for source_info in source_archives:
+        match = match_unit_to_source_archive(
+            entry,
+            source_info["archive"],
+            source_fingerprints=source_info["fingerprints"],
+        )
+        if match is None:
+            continue
+        matched_entry, similarity = match
+        if best_match is None or similarity.score > best_match["similarity"].score:
+            best_match = {
+                "entry": matched_entry,
+                "similarity": similarity,
+                "name": source_info["name"],
+                "path": source_info["path"],
+            }
+    return best_match
+
+
+def detect_probable_id_swap(
+    entry,
+    default_archive: StreamToc,
+    archive_index: GameArchiveIndex | None = None,
+):
+    # Disabled for now.
+    #
+    # The first implementation scanned and loaded too much of the game data in order to
+    # score every Unit candidate, which is not safe to run by default on real user machines.
+    # We'll redesign this with a metadata-first approach before re-enabling automatic
+    # ID swap source inference.
+    return None
 
 
 def default_component_bytes(component: UnitVertexComponent):
@@ -1101,7 +1407,13 @@ def normalize_unit_entry_from_source(
     default_archive: StreamToc,
     archive_index: GameArchiveIndex | None = None,
     log=None,
+    header_only: bool = False,
 ):
+    probable_id_swap = detect_probable_id_swap(
+        entry,
+        default_archive,
+        archive_index=archive_index,
+    )
     source_entry, source_name = resolve_unit_source_entry(
         entry.file_id,
         default_archive,
@@ -1116,18 +1428,46 @@ def normalize_unit_entry_from_source(
     source_unit.serialize(MemoryStream(source_entry.toc_data))
 
     repaired_layout = False
-    try:
-        repaired_layout = repair_unit_stream_layout_from_source(entry, source_entry, log=log)
-    except Exception as exc:
-        log_message(log, f"FAILED Unit stream layout repair for {entry.file_id}: {exc}")
-    try:
-        repaired_layout = repair_unit_mesh_order_from_source(entry, source_entry, log=log) or repaired_layout
-    except Exception as exc:
-        log_message(log, f"FAILED Unit mesh order repair for {entry.file_id}: {exc}")
-    try:
-        repaired_layout = repair_unit_lod_group_from_source(entry, source_entry, log=log) or repaired_layout
-    except Exception as exc:
-        log_message(log, f"FAILED Unit LOD group repair for {entry.file_id}: {exc}")
+    if header_only:
+        log_message(
+            log,
+            f"Using header-only Unit normalization for {entry.file_id}: preserving mesh/lod/material ordering.",
+        )
+    elif probable_id_swap is not None:
+        log_message(
+            log,
+            "PROBABLE ID SWAP detected for "
+            f"{entry.file_id}: probable source {probable_id_swap.source_id} from "
+            f"{probable_id_swap.source_name} "
+            f"(score {probable_id_swap.source_score} vs target {probable_id_swap.target_score})",
+        )
+        if probable_id_swap.source_reasons:
+            log_message(
+                log,
+                f"ID swap source match reasons for {entry.file_id}: {', '.join(probable_id_swap.source_reasons)}",
+            )
+        if probable_id_swap.target_reasons:
+            log_message(
+                log,
+                f"Target match reasons for {entry.file_id}: {', '.join(probable_id_swap.target_reasons)}",
+            )
+        log_message(
+            log,
+            f"Using ID swap safe mode for {entry.file_id}: preserving patch geometry layout and skipping target LOD/mesh coercion.",
+        )
+    else:
+        try:
+            repaired_layout = repair_unit_stream_layout_from_source(entry, source_entry, log=log)
+        except Exception as exc:
+            log_message(log, f"FAILED Unit stream layout repair for {entry.file_id}: {exc}")
+        try:
+            repaired_layout = repair_unit_mesh_order_from_source(entry, source_entry, log=log) or repaired_layout
+        except Exception as exc:
+            log_message(log, f"FAILED Unit mesh order repair for {entry.file_id}: {exc}")
+        try:
+            repaired_layout = repair_unit_lod_group_from_source(entry, source_entry, log=log) or repaired_layout
+        except Exception as exc:
+            log_message(log, f"FAILED Unit LOD group repair for {entry.file_id}: {exc}")
 
     entry_unit = StingrayUnit()
     entry_unit.serialize(MemoryStream(entry.toc_data))
@@ -1143,14 +1483,58 @@ def normalize_unit_entry_from_source(
     return repaired_layout or True
 
 
+def rebuild_idswap_unit_from_source_archive(
+    entry,
+    source_entry,
+    source_name: str,
+    log=None,
+):
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    patch_unit = StingrayUnit()
+    patch_unit.serialize(MemoryStream(entry.toc_data))
+
+    preserved_sections = []
+    for section_name in IDSWAP_PATCH_SECTION_OVERRIDES:
+        patch_blob = patch_unit.section_blobs.get(section_name, b"")
+        if not patch_blob:
+            continue
+        source_unit.section_blobs[section_name] = bytes(patch_blob)
+        preserved_sections.append(section_name)
+
+    toc = MemoryStream(io_mode="write")
+    source_unit.serialize(toc)
+
+    new_entry = source_entry.clone()
+    new_entry.file_id = entry.file_id
+    new_entry.toc_data = bytes(toc.data)
+    new_entry.gpu_data = bytes(entry.gpu_data) if entry.gpu_data else bytes(source_entry.gpu_data)
+    new_entry.stream_data = (
+        bytes(entry.stream_data) if entry.stream_data else bytes(source_entry.stream_data)
+    )
+
+    preserved_text = ", ".join(preserved_sections) if preserved_sections else "no patch sections"
+    log_message(
+        log,
+        f"IDSWAP source rebuild for Unit {entry.file_id} from {source_name} entry "
+        f"{source_entry.file_id}; preserved {preserved_text}",
+    )
+    return new_entry, "idswap-source"
+
+
 def build_entry_from_source(
     entry,
     raw_fallback_for_unsupported: bool,
     default_archive: StreamToc,
     archive_index: GameArchiveIndex | None = None,
     log=None,
+    unit_header_only: bool = False,
+    unit_passthrough: bool = False,
 ):
     mode = "raw"
+    if unit_passthrough and entry.type_id == UnitID:
+        return entry.clone(), "raw-preserve"
+
     if entry.type_id in SUPPORTED_REBUILD_TYPES:
         try:
             toc_data, gpu_data, stream_data, mode = rebuild_entry_payload(entry)
@@ -1173,6 +1557,7 @@ def build_entry_from_source(
                     default_archive,
                     archive_index=archive_index,
                     log=log,
+                    header_only=unit_header_only,
                 )
     elif raw_fallback_for_unsupported:
         new_entry = entry.clone()
@@ -1183,6 +1568,7 @@ def build_entry_from_source(
                 default_archive,
                 archive_index=archive_index,
                 log=log,
+                header_only=unit_header_only,
             )
     else:
         return None, None
@@ -1316,6 +1702,7 @@ def create_fixed_patch(
     raw_fallback_for_unsupported: bool = False,
     auto_include_unit_dependencies: bool = True,
     output_patch_path: str | None = None,
+    idswap_source_archive: str | None = None,
     log=None,
 ):
     broken_patch_path = normalize_archive_selection(broken_patch_path)
@@ -1340,6 +1727,66 @@ def create_fixed_patch(
     if not broken_patch.from_file(broken_patch_path):
         raise ValueError("Failed to load the selected broken patch.")
 
+    idswap_source_archives = []
+    idswap_source_name = None
+    idswap_source_matches = {}
+    if idswap_source_archive:
+        idswap_source_paths = resolve_archive_input_paths(game_data_folder, idswap_source_archive)
+        if not idswap_source_paths:
+            raise ValueError("No valid ID swap source archive IDs were provided.")
+        for idswap_source_path in idswap_source_paths:
+            source_name = f"game archive {Path(idswap_source_path).name}"
+            log_message(log, f"Loading ID swap source archive: {idswap_source_path}")
+            source_archive = StreamToc()
+            if not source_archive.from_file(str(idswap_source_path)):
+                raise ValueError(
+                    f"Failed to load the selected ID swap source archive: {idswap_source_path}"
+                )
+            idswap_source_archives.append(
+                {
+                    "path": idswap_source_path,
+                    "name": source_name,
+                    "archive": source_archive,
+                    "fingerprints": {
+                        int(candidate.file_id): get_unit_fingerprint(candidate)
+                        for candidate in source_archive.toc_dict.get(UnitID, {}).values()
+                    },
+                }
+            )
+
+        idswap_source_name = ", ".join(source_info["name"] for source_info in idswap_source_archives)
+        for unit_entry in broken_patch.toc_dict.get(UnitID, {}).values():
+            match = match_unit_to_source_archives(
+                unit_entry,
+                idswap_source_archives,
+            )
+            if match is None:
+                log_message(log, f"IDSWAP source match not found for Unit {unit_entry.file_id}")
+                continue
+            matched_entry = match["entry"]
+            matched_similarity = match["similarity"]
+            matched_source_name = match["name"]
+            idswap_source_matches[int(unit_entry.file_id)] = {
+                "entry": matched_entry,
+                "name": matched_source_name,
+            }
+            confidence = "low confidence" if matched_similarity.score < 50 else "matched"
+            log_message(
+                log,
+                f"IDSWAP source {confidence} for Unit {unit_entry.file_id}: "
+                f"{matched_entry.file_id} from {matched_source_name} "
+                f"(score {matched_similarity.score}; {', '.join(matched_similarity.reasons)})",
+            )
+
+    unit_passthrough_mode = bool(not idswap_source_archives and is_probable_static_idswap_patch(broken_patch))
+    unit_header_only_mode = False
+    full_passthrough_mode = unit_passthrough_mode
+    if unit_passthrough_mode:
+        log_message(
+            log,
+            "Detected static ID swap patch style: preserving patch entries exactly as they are and skipping payload normalization/rebuild.",
+        )
+
     patch_index = detect_patch_index_from_name(broken_patch_path)
     output_path = output_patch_path or resolve_output_path(export_dir, patch_index)
     fixed_patch = build_patch_template(default_archive, output_path)
@@ -1357,13 +1804,25 @@ def create_fixed_patch(
             continue
 
         for entry in entries.values():
-            new_entry, mode = build_entry_from_source(
-                entry,
-                raw_fallback_for_unsupported=raw_fallback_for_unsupported,
-                default_archive=default_archive,
-                archive_index=archive_index,
-                log=log,
-            )
+            if full_passthrough_mode:
+                new_entry, mode = entry.clone(), "raw-preserve"
+            elif entry.type_id == UnitID and int(entry.file_id) in idswap_source_matches:
+                new_entry, mode = rebuild_idswap_unit_from_source_archive(
+                    entry,
+                    idswap_source_matches[int(entry.file_id)]["entry"],
+                    idswap_source_matches[int(entry.file_id)]["name"],
+                    log=log,
+                )
+            else:
+                new_entry, mode = build_entry_from_source(
+                    entry,
+                    raw_fallback_for_unsupported=raw_fallback_for_unsupported,
+                    default_archive=default_archive,
+                    archive_index=archive_index,
+                    log=log,
+                    unit_header_only=unit_header_only_mode,
+                    unit_passthrough=unit_passthrough_mode,
+                )
             if new_entry is None:
                 skipped_entries += 1
                 log_message(log, f"Skipping unsupported type without raw fallback: {label} entry {entry.file_id}")
@@ -1422,6 +1881,7 @@ def create_fixed_mod_archive(
     keep_unknown_types: bool = True,
     raw_fallback_for_unsupported: bool = False,
     auto_include_unit_dependencies: bool = True,
+    idswap_source_archive: str | None = None,
     log=None,
 ):
     if not Path(game_data_folder).is_dir():
@@ -1460,6 +1920,7 @@ def create_fixed_mod_archive(
                 raw_fallback_for_unsupported=raw_fallback_for_unsupported,
                 auto_include_unit_dependencies=auto_include_unit_dependencies,
                 output_patch_path=patch_path,
+                idswap_source_archive=idswap_source_archive,
                 log=log,
             )
             fixed_patch_results.append(

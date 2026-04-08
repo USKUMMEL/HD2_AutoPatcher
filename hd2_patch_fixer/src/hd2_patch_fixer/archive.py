@@ -32,6 +32,7 @@ from .parsers import (
 from .slim import get_package_toc, is_slim_version, load_package, slim_init
 
 
+#region Module Helpers And Constants
 def log_message(log, message):
     if log is not None:
         log(message)
@@ -53,8 +54,10 @@ IDSWAP_PATCH_SECTION_OVERRIDES = (
     "customization_info",
     "connecting_bone_hash",
 )
+#endregion Module Helpers And Constants
 
 
+#region Binary Data Models
 @dataclass
 class TocFileType:
     type_id: int = 0
@@ -446,8 +449,10 @@ class UnitMeshSection:
             stream.uint32(offset)
         stream.seek(end_location)
         return bytes(stream.data)
+#endregion Binary Data Models
 
 
+#region Archive Containers And Indexing
 class TocEntry:
     def __init__(self):
         self.file_id = 0
@@ -748,8 +753,10 @@ class GameArchiveIndex:
                     continue
                 seen.add(file_id)
                 yield entry, f"game archive {Path(search_archive.path).name}"
+#endregion Archive Containers And Indexing
 
 
+#region Archive And Package Utilities
 def build_patch_template(default_archive: StreamToc, output_path: str):
     patch = StreamToc()
     patch.magic = default_archive.magic
@@ -905,8 +912,10 @@ def rebuild_entry_payload(entry):
         return bytes(toc.data), b"", b"", "rebuilt"
 
     return bytes(entry.toc_data), bytes(entry.gpu_data), bytes(entry.stream_data), "raw"
+#endregion Archive And Package Utilities
 
 
+#region Unit Analysis And ID Swap Matching
 def parse_unit_refs(entry):
     stream = MemoryStream(entry.toc_data)
     unk_ref1 = stream.uint64(0)
@@ -1193,8 +1202,10 @@ def detect_probable_id_swap(
     # We'll redesign this with a metadata-first approach before re-enabling automatic
     # ID swap source inference.
     return None
+#endregion Unit Analysis And ID Swap Matching
 
 
+#region Unit Repair And Rebuild
 def default_component_bytes(component: UnitVertexComponent):
     if component.type_id == 5 and component.format_id == 4:
         return b"\xFF\xFF\xFF\xFF"
@@ -1573,8 +1584,10 @@ def build_entry_from_source(
     else:
         return None, None
     return new_entry, mode
+#endregion Unit Repair And Rebuild
 
 
+#region Dependency Resolution
 def resolve_dependency_entry(
     file_id,
     type_id,
@@ -1691,8 +1704,10 @@ def validate_unit_dependencies(
                 continue
             unresolved.append((unit_entry.file_id, label, ref_id))
     return unresolved
+#endregion Dependency Resolution
 
 
+#region Public Fix Workflows
 def create_fixed_patch(
     game_data_folder: str,
     broken_patch_path: str,
@@ -1941,3 +1956,4 @@ def create_fixed_mod_archive(
         "patch_results": fixed_patch_results,
         "incomplete_patch_groups": incomplete_groups,
     }
+#endregion Public Fix Workflows

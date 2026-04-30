@@ -46,6 +46,110 @@ SUPPORTED_REBUILD_TYPES = {
     StateMachineID,
 }
 
+OLD_UNIT_VERSION = 10800437
+
+VERTEX_FORMAT_NAME_BY_VERSION = {
+    "new": {
+        0: "float",
+        1: "vec2_float",
+        2: "vec3_float",
+        3: "vec4_float",
+        4: "rgba_r8g8b8a8",
+        21: "uint32",
+        22: "vec2_uint32",
+        23: "vec3_uint32",
+        24: "vec4_uint32",
+        25: "int8",
+        26: "vec2_int8",
+        27: "vec3_int8",
+        28: "vec4_int8",
+        29: "vec4_1010102",
+        30: "unk_normal",
+        32: "float16",
+        33: "vec2_half",
+        34: "vec3_half",
+        35: "vec4_half",
+    },
+    "old": {
+        0: "float",
+        1: "vec2_float",
+        2: "vec3_float",
+        3: "vec4_float",
+        4: "rgba_r8g8b8a8",
+        17: "uint32",
+        18: "vec2_uint32",
+        19: "vec3_uint32",
+        20: "vec4_uint32",
+        21: "int8",
+        22: "vec2_int8",
+        23: "vec3_int8",
+        24: "vec4_int8",
+        25: "vec4_1010102",
+        26: "unk_normal",
+        28: "float16",
+        29: "vec2_half",
+        30: "vec3_half",
+        31: "vec4_half",
+    },
+}
+
+VERTEX_FORMAT_ID_BY_VERSION = {
+    version: {name: format_id for format_id, name in format_map.items()}
+    for version, format_map in VERTEX_FORMAT_NAME_BY_VERSION.items()
+}
+
+VERTEX_FORMAT_SIZE_BY_NAME = {
+    "float": 4,
+    "vec2_float": 8,
+    "vec3_float": 12,
+    "vec4_float": 16,
+    "rgba_r8g8b8a8": 4,
+    "uint32": 4,
+    "vec2_uint32": 8,
+    "vec3_uint32": 12,
+    "vec4_uint32": 16,
+    "int8": 1,
+    "vec2_int8": 2,
+    "vec3_int8": 3,
+    "vec4_int8": 4,
+    "vec4_1010102": 4,
+    "unk_normal": 4,
+    "float16": 2,
+    "vec2_half": 4,
+    "vec3_half": 6,
+    "vec4_half": 8,
+}
+
+
+def is_old_unit_version(unit_version: int):
+    return 0 < unit_version <= OLD_UNIT_VERSION
+
+
+def vertex_format_version_key(unit_version: int):
+    return "old" if is_old_unit_version(unit_version) else "new"
+
+
+def get_vertex_format_name(format_id: int, unit_version: int):
+    preferred_version = vertex_format_version_key(unit_version)
+    fallback_version = "new" if preferred_version == "old" else "old"
+    format_name = VERTEX_FORMAT_NAME_BY_VERSION[preferred_version].get(format_id)
+    if format_name is None:
+        format_name = VERTEX_FORMAT_NAME_BY_VERSION[fallback_version].get(format_id)
+    if format_name is None:
+        raise ValueError(
+            f"Unsupported Unit vertex format {format_id} for unit version {unit_version or 'unknown'}"
+        )
+    return format_name
+
+
+def get_vertex_format_id(format_name: str, unit_version: int):
+    format_id = VERTEX_FORMAT_ID_BY_VERSION[vertex_format_version_key(unit_version)].get(format_name)
+    if format_id is None:
+        raise ValueError(
+            f"Unsupported Unit vertex format name {format_name} for unit version {unit_version or 'unknown'}"
+        )
+    return format_id
+
 IDSWAP_PATCH_SECTION_OVERRIDES = (
     "bone_info",
     "stream_info",
@@ -82,6 +186,7 @@ class UnitVertexComponent:
     format_id: int = 0
     index: int = 0
     unknown: int = 0
+    unit_version: int = 0
 
     def serialize(self, stream: MemoryStream):
         return UnitVertexComponent(
@@ -89,6 +194,7 @@ class UnitVertexComponent:
             format_id=stream.uint32(self.format_id),
             index=stream.uint32(self.index),
             unknown=stream.uint64(self.unknown),
+            unit_version=self.unit_version,
         )
 
     @property
@@ -96,21 +202,25 @@ class UnitVertexComponent:
         return (self.type_id, self.format_id, self.index)
 
     @property
+    def format_name(self):
+        return get_vertex_format_name(self.format_id, self.unit_version)
+
+    @property
+    def semantic_key(self):
+        return (self.type_id, self.format_name, self.index)
+
+    @property
     def size(self):
-        size_lut = {
-            0: 4,
-            2: 12,
-            4: 4,
-            20: 16,
-            24: 4,
-            25: 4,
-            26: 4,
-            29: 4,
-            31: 8,
-        }
-        if self.format_id not in size_lut:
-            raise ValueError(f"Unsupported Unit vertex format: {self.format_id}")
-        return size_lut[self.format_id]
+        return VERTEX_FORMAT_SIZE_BY_NAME[self.format_name]
+
+    def converted_for_version(self, unit_version: int):
+        return UnitVertexComponent(
+            type_id=self.type_id,
+            format_id=get_vertex_format_id(self.format_name, unit_version),
+            index=self.index,
+            unknown=self.unknown,
+            unit_version=unit_version,
+        )
 
 
 @dataclass(frozen=True)
@@ -165,7 +275,7 @@ class UnitStreamInfo:
     ending_bytes: bytes = b"\x00" * 16
 
     @classmethod
-    def parse(cls, stream: MemoryStream):
+    def parse(cls, stream: MemoryStream, unit_version: int = 0):
         component_info_id = stream.uint64(0)
         component_area_offset = stream.tell()
         stream.seek(component_area_offset + 320)
@@ -192,7 +302,7 @@ class UnitStreamInfo:
         stream.seek(component_area_offset)
         components = []
         for _ in range(num_components):
-            component = UnitVertexComponent().serialize(stream)
+            component = UnitVertexComponent(unit_version=unit_version).serialize(stream)
             components.append(component)
         stream.seek(record_end)
 
@@ -258,7 +368,7 @@ class UnitStreamSection:
     stream_unk2: int = 0
 
     @classmethod
-    def parse(cls, data: bytes):
+    def parse(cls, data: bytes, unit_version: int = 0):
         stream = MemoryStream(data)
         num_streams = stream.uint32(0)
         offsets = [stream.uint32(0) for _ in range(num_streams)]
@@ -267,7 +377,7 @@ class UnitStreamSection:
         stream_infos = []
         for offset in offsets:
             stream.seek(offset)
-            stream_infos.append(UnitStreamInfo.parse(stream))
+            stream_infos.append(UnitStreamInfo.parse(stream, unit_version=unit_version))
         return cls(stream_infos=stream_infos, stream_unk_ids=stream_unk_ids, stream_unk2=stream_unk2)
 
     def build(self):
@@ -974,7 +1084,7 @@ def extract_unit_stream_sections(unit: StingrayUnit):
     stream_blob = unit.section_blobs.get("stream_info", b"")
     if not stream_blob:
         return None
-    return UnitStreamSection.parse(stream_blob)
+    return UnitStreamSection.parse(stream_blob, unit_version=unit.unit_version)
 
 
 def extract_unit_mesh_sections(unit: StingrayUnit):
@@ -1006,7 +1116,7 @@ def get_unit_fingerprint(entry):
     stream_layouts = ()
     if stream_sections is not None:
         stream_layouts = tuple(
-            tuple(component.key for component in info.components)
+            tuple(component.semantic_key for component in info.components)
             for info in stream_sections.stream_infos
         )
 
@@ -1207,11 +1317,39 @@ def detect_probable_id_swap(
 
 #region Unit Repair And Rebuild
 def default_component_bytes(component: UnitVertexComponent):
-    if component.type_id == 5 and component.format_id == 4:
+    if component.type_id == 5 and component.format_name == "rgba_r8g8b8a8":
         return b"\xFF\xFF\xFF\xFF"
-    if component.type_id == 7 and component.format_id == 31:
+    if component.type_id == 7 and component.format_name == "vec4_half":
         return b"\x00\x3C\x00\x00\x00\x00\x00\x00"
     return b"\x00" * component.size
+
+
+def convert_unit_stream_section_version(
+    unit: StingrayUnit,
+    target_unit_version: int,
+):
+    stream_blob = unit.section_blobs.get("stream_info", b"")
+    if not stream_blob or unit.unit_version == target_unit_version:
+        return False
+
+    stream_sections = UnitStreamSection.parse(stream_blob, unit_version=unit.unit_version)
+    changed = False
+    for info in stream_sections.stream_infos:
+        converted_components = []
+        for component in info.components:
+            converted_component = component.converted_for_version(target_unit_version)
+            if converted_component.key != component.key:
+                changed = True
+            converted_components.append(converted_component)
+        if changed:
+            info.components = converted_components
+            info.vertex_stride = sum(component.size for component in converted_components)
+
+    if not changed:
+        return False
+
+    unit.section_blobs["stream_info"] = stream_sections.build()
+    return True
 
 
 def rebuild_vertex_buffer_for_layout(
@@ -1229,7 +1367,7 @@ def rebuild_vertex_buffer_for_layout(
     old_component_offsets = {}
     running_offset = 0
     for component in old_info.components:
-        old_component_offsets[component.key] = (running_offset, component.size)
+        old_component_offsets[component.semantic_key] = (running_offset, component.size)
         running_offset += component.size
     if running_offset != old_info.vertex_stride:
         raise ValueError("Unit stream component sizes do not match vertex stride")
@@ -1238,11 +1376,11 @@ def rebuild_vertex_buffer_for_layout(
     for vertex_index in range(old_info.num_vertices):
         vertex_start = vertex_index * old_stride
         for component in target_components:
-            component_info = old_component_offsets.get(component.key)
+            component_info = old_component_offsets.get(component.semantic_key)
             if component_info is None:
                 if component.type_id in {0, 1, 6, 7}:
                     raise ValueError(
-                        f"Missing critical vertex component {component.key} in stream layout"
+                        f"Missing critical vertex component {component.semantic_key} in stream layout"
                     )
                 new_parts.append(default_component_bytes(component))
                 continue
@@ -1265,6 +1403,18 @@ def repair_unit_stream_layout_from_source(
     entry_unit = StingrayUnit()
     entry_unit.serialize(MemoryStream(entry.toc_data))
 
+    if convert_unit_stream_section_version(entry_unit, source_unit.unit_version):
+        toc = MemoryStream(io_mode="write")
+        entry_unit.serialize(toc)
+        entry.toc_data = bytes(toc.data)
+        log_message(
+            log,
+            f"CONVERTED Unit stream component formats to version {source_unit.unit_version}: {entry.file_id}",
+        )
+
+        entry_unit = StingrayUnit()
+        entry_unit.serialize(MemoryStream(entry.toc_data))
+
     source_streams = extract_unit_stream_sections(source_unit)
     entry_streams = extract_unit_stream_sections(entry_unit)
     if source_streams is None or entry_streams is None:
@@ -1285,14 +1435,21 @@ def repair_unit_stream_layout_from_source(
         old_vertex_buffer = bytes(entry.gpu_data[entry_info.vertex_buffer_offset:old_vertex_end])
         old_index_buffer = bytes(entry.gpu_data[entry_info.index_buffer_offset:old_index_end])
 
-        source_layout = [component.key for component in source_info.components]
-        entry_layout = [component.key for component in entry_info.components]
+        source_unit_version = source_unit.unit_version
+        source_layout = [component.semantic_key for component in source_info.components]
+        entry_layout = [component.semantic_key for component in entry_info.components]
         extra_entry_components = [
-            component for component in entry_info.components
-            if component.key not in source_layout
+            component.converted_for_version(source_unit_version)
+            for component in entry_info.components
+            if component.semantic_key not in source_layout
         ]
-        target_components = list(source_info.components) + extra_entry_components
-        target_layout = [component.key for component in target_components]
+        target_components = [
+            component.converted_for_version(source_unit_version)
+            for component in source_info.components
+        ] + extra_entry_components
+        target_layout = [component.semantic_key for component in target_components]
+        target_raw_layout = [component.key for component in target_components]
+        entry_raw_layout = [component.key for component in entry_info.components]
 
         if target_layout != entry_layout:
             rebuilt_vertex_buffer = rebuild_vertex_buffer_for_layout(
@@ -1307,6 +1464,12 @@ def repair_unit_stream_layout_from_source(
             )
         else:
             rebuilt_vertex_buffer = old_vertex_buffer
+            if target_raw_layout != entry_raw_layout:
+                changed = True
+                log_message(
+                    log,
+                    f"UPDATED Unit stream component format IDs {entry.file_id} stream {stream_index}: {entry_raw_layout} -> {target_raw_layout}",
+                )
 
         new_info = copy.deepcopy(entry_info)
         new_info.components = list(target_components)
@@ -1504,6 +1667,12 @@ def rebuild_idswap_unit_from_source_archive(
     source_unit.serialize(MemoryStream(source_entry.toc_data))
     patch_unit = StingrayUnit()
     patch_unit.serialize(MemoryStream(entry.toc_data))
+
+    if convert_unit_stream_section_version(patch_unit, source_unit.unit_version):
+        log_message(
+            log,
+            f"CONVERTED IDSWAP Unit stream component formats to version {source_unit.unit_version}: {entry.file_id}",
+        )
 
     preserved_sections = []
     for section_name in IDSWAP_PATCH_SECTION_OVERRIDES:

@@ -703,6 +703,14 @@ class StingrayUnit:
             self.save(stream)
         return self
 
+    @property
+    def header_flag(self):
+        return self.header_data_1 & 0xFFFFFFFF
+
+    @property
+    def unit_version(self):
+        return self.header_data_1 >> 32
+
     def _offset_map(self):
         return {
             "wwise_callback": self.wwise_callback_offset,

@@ -73,6 +73,9 @@ class MemoryStream:
     def int32(self, value):
         return self.serialize(value, "<i", 4)
 
+    def int64(self, value):
+        return self.serialize(value, "<q", 8)
+
     def float16(self, value):
         return self.serialize(value, "<e", 2)
 
@@ -90,9 +93,61 @@ class MemoryStream:
             value = value[:length]
         return value
 
+    def vec2_float(self, value):
+        value = self._resize_vec(value, 2)
+        return [self.float32(value[0]), self.float32(value[1])]
+
     def vec3_float(self, value):
         value = self._resize_vec(value, 3)
         return [self.float32(value[0]), self.float32(value[1]), self.float32(value[2])]
+
+    def vec4_float(self, value):
+        value = self._resize_vec(value, 4)
+        return [self.float32(value[0]), self.float32(value[1]), self.float32(value[2]), self.float32(value[3])]
+
+    def vec2_half(self, value):
+        value = self._resize_vec(value, 2)
+        return [self.float16(value[0]), self.float16(value[1])]
+
+    def vec3_half(self, value):
+        value = self._resize_vec(value, 3)
+        return [self.float16(value[0]), self.float16(value[1]), self.float16(value[2])]
+
+    def vec4_half(self, value):
+        value = self._resize_vec(value, 4)
+        return [self.float16(value[0]), self.float16(value[1]), self.float16(value[2]), self.float16(value[3])]
+
+    def vec2_int8(self, value):
+        value = self._resize_vec(value, 2)
+        return [self.int8(value[0]), self.int8(value[1])]
+
+    def vec3_int8(self, value):
+        value = self._resize_vec(value, 3)
+        return [self.int8(value[0]), self.int8(value[1]), self.int8(value[2])]
+
+    def vec4_int8(self, value):
+        value = self._resize_vec(value, 4)
+        return [self.int8(value[0]), self.int8(value[1]), self.int8(value[2]), self.int8(value[3])]
+
+    def vec4_uint8(self, value):
+        value = self._resize_vec(value, 4)
+        return [self.uint8(value[0]), self.uint8(value[1]), self.uint8(value[2]), self.uint8(value[3])]
+
+    def vec4_uint16(self, value):
+        value = self._resize_vec(value, 4)
+        return [self.uint16(value[0]), self.uint16(value[1]), self.uint16(value[2]), self.uint16(value[3])]
+
+    def vec2_uint32(self, value):
+        value = self._resize_vec(value, 2)
+        return [self.uint32(value[0]), self.uint32(value[1])]
+
+    def vec3_uint32(self, value):
+        value = self._resize_vec(value, 3)
+        return [self.uint32(value[0]), self.uint32(value[1]), self.uint32(value[2])]
+
+    def vec4_uint32(self, value):
+        value = self._resize_vec(value, 4)
+        return [self.uint32(value[0]), self.uint32(value[1]), self.uint32(value[2]), self.uint32(value[3])]
 
     def bytes(self, value, size=-1):
         if size == -1:

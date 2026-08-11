@@ -9,6 +9,11 @@ from math import ceil
 from pathlib import Path
 import zipfile
 
+from .audio import AUDIO_TYPE_IDS, inspect_audio_collection, inspect_audio_entry
+from .community_audio_adapter import (
+    CommunityAudioAdapterError,
+    migrate_audio_patch_with_community_engine,
+)
 from .constants import (
     BaseArchiveHexID,
     BoneID,
@@ -19,12 +24,14 @@ from .constants import (
     TexID,
     UnitID,
     TYPE_NAME_MAP,
+    WwiseBankID,
+    WwiseMetaDataID,
 )
 from .memory_stream import MemoryStream
+from .particle import migrate_particle_effect
 from .parsers import (
     StingrayBones,
     StingrayMaterial,
-    StingrayParticles,
     StingrayStateMachine,
     StingrayTexture,
     StingrayUnit,
@@ -835,6 +842,49 @@ class GameArchiveIndex:
                 return archive.path
         return None
 
+    def find_archive_paths(self, file_ids, type_id: int):
+        """Map resource IDs to every base-game archive that contains them.
+
+        ``find_archive_path`` is appropriate for a single dependency lookup.
+        Audio imports commonly contain several Wwise Banks, however, so doing
+        one full archive scan per Bank is needlessly expensive.  This method
+        builds the lightweight TOC index once, then walks every archive once
+        to find all requested IDs.  It only examines archive TOC headers and
+        never attempts to parse Wwise/HIRC payloads.
+
+        The returned tuples intentionally retain every match.  A Bank normally
+        belongs to one base-game archive, but reporting duplicates is safer
+        than silently selecting an arbitrary archive when a game build has
+        overlapping resources.
+        """
+
+        requested_ids = tuple(sorted({int(file_id) for file_id in file_ids}))
+        matches = {file_id: [] for file_id in requested_ids}
+        if not requested_ids:
+            return {}
+
+        self.build()
+        requested_set = set(requested_ids)
+        for archive in self.search_archives:
+            available_ids = archive.toc_entries.get(int(type_id), set())
+            for file_id in requested_set.intersection(available_ids):
+                matches[file_id].append(archive.path)
+
+        return {
+            file_id: tuple(matches[file_id])
+            for file_id in requested_ids
+        }
+
+    def map_wwise_bank_ids_to_archive_paths(self, bank_ids):
+        """Return ``{bank_id: (game_archive_path, ...)}`` for Wwise Banks.
+
+        ``SearchToc`` already knows how to read both legacy archives and the
+        slim/bundled TOC path, so this works for either game layout after the
+        caller has initialized ``slim`` for the selected game-data folder.
+        """
+
+        return self.find_archive_paths(bank_ids, WwiseBankID)
+
     def load_archive(self, archive_path: str):
         archive = self.archive_cache.get(archive_path)
         if archive is not None:
@@ -863,6 +913,110 @@ class GameArchiveIndex:
                     continue
                 seen.add(file_id)
                 yield entry, f"game archive {Path(search_archive.path).name}"
+
+
+def map_patch_wwise_banks_to_game_archives(
+    patch: StreamToc,
+    archive_index: GameArchiveIndex,
+):
+    """Map every Wwise Bank included by ``patch`` to base-game archive paths.
+
+    This deliberately treats a patched Bank's archive ``file_id`` as the
+    lookup key.  That is the relationship used by the community audio tool
+    and is stable independently of the Bank's version-sensitive inner Wwise
+    hierarchy.  Missing IDs are returned with an empty tuple so a caller can
+    show a useful diagnostic or keep a standalone Bank without guessing a
+    destination.
+    """
+
+    bank_ids = patch.toc_dict.get(WwiseBankID, {}).keys()
+    return archive_index.map_wwise_bank_ids_to_archive_paths(bank_ids)
+
+
+def migrate_patch_audio_from_current_game_archives(
+    *,
+    game_data_folder: str,
+    broken_patch_path: str,
+    broken_patch: StreamToc,
+    archive_index: GameArchiveIndex,
+    log=None,
+):
+    """Run the community Wwise merge and return its audio entries.
+
+    This is deliberately an *aggressive* compatibility mode.  A Wwise Bank
+    produced by the community audio modder often contains all media from the
+    game version on which the mod was authored, so there is no reliable way to
+    distinguish a deliberate replacement from a vanilla sound that changed
+    between game versions without the author's original baseline/manifest.
+    The caller must opt in through the GUI before invoking this function.
+
+    Entries for Banks which cannot be mapped to a current archive are not sent
+    to the community engine; the normal raw-preserve path keeps them intact.
+    """
+
+    bank_paths = map_patch_wwise_banks_to_game_archives(broken_patch, archive_index)
+    selected_paths = []
+    for bank_id, candidates in bank_paths.items():
+        if not candidates:
+            log_message(
+                log,
+                f"COMMUNITY AUDIO: No current game archive found for Bank {bank_id}; preserving it unchanged.",
+            )
+            continue
+        if len(candidates) > 1:
+            log_message(
+                log,
+                f"COMMUNITY AUDIO: Bank {bank_id} appears in multiple archives; using {Path(candidates[0]).name}.",
+            )
+        selected_paths.append(candidates[0])
+
+    if not selected_paths:
+        return {}
+
+    # The community engine produces a complete temporary patch.  Read it with
+    # our own archive writer, then merge only its audio entries into the final
+    # fixed patch; Unit/texture/etc. data remains under this tool's control.
+    with tempfile.TemporaryDirectory(prefix="hd2_audio_migration_") as temp_dir:
+        migrated_patch_path = Path(temp_dir) / "community_audio.patch_0"
+        try:
+            result = migrate_audio_patch_with_community_engine(
+                base_archive_paths=selected_paths,
+                patch_path=broken_patch_path,
+                output_patch_path=migrated_patch_path,
+                game_data_folder=game_data_folder,
+                log=log,
+            )
+        except CommunityAudioAdapterError as exc:
+            log_message(
+                log,
+                f"COMMUNITY AUDIO: Semantic migration failed; preserving original audio. {exc}",
+            )
+            return {}
+
+        migrated_patch = StreamToc()
+        if not migrated_patch.from_file(str(result.output_path)):
+            log_message(
+                log,
+                "COMMUNITY AUDIO: Generated patch could not be read; preserving original audio.",
+            )
+            return {}
+
+        migrated_entries = {}
+        for type_id in AUDIO_TYPE_IDS:
+            for entry in migrated_patch.toc_dict.get(type_id, {}).values():
+                # The community writer does not understand Wwise Metadata; it
+                # is intentionally retained from the original patch instead.
+                if type_id == WwiseMetaDataID:
+                    continue
+                migrated_entries[(int(type_id), int(entry.file_id))] = entry.clone()
+
+        log_message(
+            log,
+            "COMMUNITY AUDIO: Migrated "
+            f"{len(result.modified_bank_ids)} Bank(s), {len(result.modified_stream_ids)} Stream(s); "
+            f"using {len(result.base_archives)} current game archive(s).",
+        )
+        return migrated_entries
 #endregion Archive Containers And Indexing
 
 
@@ -1008,11 +1162,11 @@ def rebuild_entry_payload(entry):
         return bytes(toc.data), b"", b"", "rebuilt"
 
     if entry.type_id == ParticleID:
-        asset = StingrayParticles()
-        asset.serialize(MemoryStream(entry.toc_data))
-        toc = MemoryStream(entry.toc_data, io_mode="write")
-        asset.serialize(toc)
-        return bytes(toc.data), b"", b"", "rebuilt"
+        # Particle effects need a version-aware migration.  Preserve their
+        # stream/GPU data byte-for-byte; the community updater only changes
+        # the effect payload stored in the package TOC.
+        toc_data, mode = migrate_particle_effect(entry.toc_data)
+        return toc_data, bytes(entry.gpu_data), bytes(entry.stream_data), mode
 
     if entry.type_id == StateMachineID:
         asset = StingrayStateMachine()
@@ -1646,7 +1800,13 @@ def normalize_unit_entry_from_source(
     entry_unit = StingrayUnit()
     entry_unit.serialize(MemoryStream(entry.toc_data))
     old_header = entry_unit.header_data_1
-    entry_unit.header_data_1 = source_unit.header_data_1
+    # The header contains a 32-bit Unit flag followed by the 32-bit format
+    # version.  The community updater replaces only the version at +0x2C;
+    # preserve the patch's flag so custom Unit metadata is not overwritten.
+    entry_unit.header_data_1 = (
+        (source_unit.header_data_1 & 0xFFFFFFFF00000000)
+        | (old_header & 0xFFFFFFFF)
+    )
     toc = MemoryStream(io_mode="write")
     entry_unit.serialize(toc)
     entry.toc_data = bytes(toc.data)
@@ -1714,6 +1874,20 @@ def build_entry_from_source(
     mode = "raw"
     if unit_passthrough and entry.type_id == UnitID:
         return entry.clone(), "raw-preserve"
+
+    if entry.type_id in AUDIO_TYPE_IDS:
+        # Wwise hierarchy records are version-sensitive.  Validate only their
+        # stable outer envelopes, then retain the author's payload verbatim
+        # while StreamToc writes fresh archive offsets and sizes.
+        inspection = inspect_audio_entry(entry)
+        if not inspection.valid:
+            log_message(
+                log,
+                f"AUDIO WARNING {inspection.kind} {entry.file_id}: "
+                f"{'; '.join(inspection.notes)}; preserving original bytes.",
+            )
+            return entry.clone(), "audio-unvalidated-preserve"
+        return entry.clone(), "audio-validated-preserve"
 
     if entry.type_id in SUPPORTED_REBUILD_TYPES:
         try:
@@ -1883,8 +2057,9 @@ def create_fixed_patch(
     export_dir: str,
     keep_type_ids: set[int],
     keep_unknown_types: bool = True,
-    raw_fallback_for_unsupported: bool = False,
+    raw_fallback_for_unsupported: bool = True,
     auto_include_unit_dependencies: bool = True,
+    migrate_audio: bool = False,
     output_patch_path: str | None = None,
     idswap_source_archive: str | None = None,
     log=None,
@@ -1898,7 +2073,11 @@ def create_fixed_patch(
         raise ValueError("Export folder is invalid.")
 
     slim_init(game_data_folder)
-    archive_index = GameArchiveIndex(game_data_folder) if auto_include_unit_dependencies else None
+    archive_index = (
+        GameArchiveIndex(game_data_folder)
+        if auto_include_unit_dependencies or migrate_audio
+        else None
+    )
 
     default_archive_path = str(Path(game_data_folder) / BaseArchiveHexID)
     log_message(log, f"Loading default archive: {default_archive_path}")
@@ -1975,6 +2154,21 @@ def create_fixed_patch(
     output_path = output_patch_path or resolve_output_path(export_dir, patch_index)
     fixed_patch = build_patch_template(default_archive, output_path)
 
+    migrated_audio_entries = {}
+    if migrate_audio and WwiseBankID in keep_type_ids and archive_index is not None:
+        log_message(
+            log,
+            "COMMUNITY AUDIO: Aggressive semantic migration enabled. "
+            "This can reapply old vanilla Wwise media if the mod was built on an older game version.",
+        )
+        migrated_audio_entries = migrate_patch_audio_from_current_game_archives(
+            game_data_folder=game_data_folder,
+            broken_patch_path=broken_patch_path,
+            broken_patch=broken_patch,
+            archive_index=archive_index,
+            log=log,
+        )
+
     kept_entries = 0
     skipped_entries = 0
     copied_counts = {}
@@ -2016,6 +2210,27 @@ def create_fixed_patch(
             kept_entries += 1
             copied_counts[label] = copied_counts.get(label, 0) + 1
             log_message(log, f"{mode.upper()} {label}: {entry.file_id}")
+
+    # Add the complete Bank/Dep/Stream set generated by the community engine
+    # after ordinary copying.  This includes dependencies which were implicit
+    # in the original mod but are required by the current game archive.
+    for (type_id, file_id), entry in migrated_audio_entries.items():
+        should_keep = type_id in keep_type_ids or (
+            keep_unknown_types and type_id not in TYPE_NAME_MAP
+        )
+        if not should_keep:
+            continue
+        existing = fixed_patch.get_entry(file_id, type_id)
+        fixed_patch.add_entry(entry.clone(), override=True)
+        label = TYPE_NAME_MAP.get(type_id, f"Unknown ({type_id})")
+        if existing is None:
+            kept_entries += 1
+            copied_counts[label] = copied_counts.get(label, 0) + 1
+        log_message(log, f"AUDIO-COMMUNITY-MIGRATED {label}: {file_id}")
+
+    audio_report = inspect_audio_collection(fixed_patch.toc_dict)
+    for line in audio_report.log_lines():
+        log_message(log, line)
 
     dependency_issues = []
     if auto_include_unit_dependencies and UnitID in fixed_patch.toc_dict:
@@ -2063,8 +2278,9 @@ def create_fixed_mod_archive(
     output_zip_path: str,
     keep_type_ids: set[int],
     keep_unknown_types: bool = True,
-    raw_fallback_for_unsupported: bool = False,
+    raw_fallback_for_unsupported: bool = True,
     auto_include_unit_dependencies: bool = True,
+    migrate_audio: bool = False,
     idswap_source_archive: str | None = None,
     log=None,
 ):
@@ -2103,6 +2319,7 @@ def create_fixed_mod_archive(
                 keep_unknown_types=keep_unknown_types,
                 raw_fallback_for_unsupported=raw_fallback_for_unsupported,
                 auto_include_unit_dependencies=auto_include_unit_dependencies,
+                migrate_audio=migrate_audio,
                 output_patch_path=patch_path,
                 idswap_source_archive=idswap_source_archive,
                 log=log,

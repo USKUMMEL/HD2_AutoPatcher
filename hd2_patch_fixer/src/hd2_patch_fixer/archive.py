@@ -1823,41 +1823,70 @@ def rebuild_idswap_unit_from_source_archive(
     source_name: str,
     log=None,
 ):
-    source_unit = StingrayUnit()
-    source_unit.serialize(MemoryStream(source_entry.toc_data))
-    patch_unit = StingrayUnit()
-    patch_unit.serialize(MemoryStream(entry.toc_data))
+    """Apply the community Unit updater's surgical ID-swap migration.
 
-    if convert_unit_stream_section_version(patch_unit, source_unit.unit_version):
-        log_message(
-            log,
-            f"CONVERTED IDSWAP Unit stream component formats to version {source_unit.unit_version}: {entry.file_id}",
-        )
+    Swapped weapons often have a different Unit ID from the current-game
+    source Unit.  Rebuilding a full ``StingrayUnit`` from that source mixes
+    its transform/bone data with the patch's GPU buffers and can crash the
+    game.  The community updater instead changes only the format version,
+    legacy vertex-format IDs, and LOD-group blob, retaining every other byte
+    from the patch Unit.  Do the same here.
+    """
+    patch_data = bytearray(entry.toc_data)
+    source_data = bytes(source_entry.toc_data)
+    if len(patch_data) < 0x60 or len(source_data) < 0x38:
+        raise ValueError("Unit payload is too small for ID swap migration")
 
-    preserved_sections = []
-    for section_name in IDSWAP_PATCH_SECTION_OVERRIDES:
-        patch_blob = patch_unit.section_blobs.get(section_name, b"")
-        if not patch_blob:
-            continue
-        source_unit.section_blobs[section_name] = bytes(patch_blob)
-        preserved_sections.append(section_name)
+    source_version = struct.unpack_from("<I", source_data, 0x2C)[0]
+    source_lod_offset, source_joint_offset = struct.unpack_from("<II", source_data, 0x30)
+    if not (0 <= source_lod_offset <= source_joint_offset <= len(source_data)):
+        raise ValueError("Source Unit has invalid LOD-group bounds")
+    source_lod_data = source_data[source_lod_offset:source_joint_offset]
 
-    toc = MemoryStream(io_mode="write")
-    source_unit.serialize(toc)
+    patch_version = struct.unpack_from("<I", patch_data, 0x2C)[0]
+    if patch_version < 0xA4CD36:
+        layout_list_offset = struct.unpack_from("<I", patch_data, 0x5C)[0]
+        if layout_list_offset + 4 > len(patch_data):
+            raise ValueError("Patch Unit has invalid stream-layout offset")
+        layout_count = struct.unpack_from("<I", patch_data, layout_list_offset)[0]
+        offsets_start = layout_list_offset + 4
+        if offsets_start + layout_count * 4 > len(patch_data):
+            raise ValueError("Patch Unit has truncated stream-layout offsets")
+        for index in range(layout_count):
+            layout_offset = struct.unpack_from("<I", patch_data, offsets_start + index * 4)[0]
+            item_start = layout_list_offset + layout_offset + 8
+            if item_start + 16 * 20 > len(patch_data):
+                raise ValueError("Patch Unit has truncated stream-layout items")
+            for item_index in range(16):
+                format_offset = item_start + item_index * 20 + 4
+                item_format = struct.unpack_from("<I", patch_data, format_offset)[0]
+                if item_format > 16:
+                    struct.pack_into("<I", patch_data, format_offset, item_format + 4)
 
-    new_entry = source_entry.clone()
-    new_entry.file_id = entry.file_id
-    new_entry.toc_data = bytes(toc.data)
-    new_entry.gpu_data = bytes(entry.gpu_data) if entry.gpu_data else bytes(source_entry.gpu_data)
-    new_entry.stream_data = (
-        bytes(entry.stream_data) if entry.stream_data else bytes(source_entry.stream_data)
-    )
+    patch_lod_offset, patch_joint_offset = struct.unpack_from("<II", patch_data, 0x30)
+    if not (0 <= patch_lod_offset <= patch_joint_offset <= len(patch_data)):
+        raise ValueError("Patch Unit has invalid LOD-group bounds")
+    size_difference = len(source_lod_data) - (patch_joint_offset - patch_lod_offset)
 
-    preserved_text = ", ".join(preserved_sections) if preserved_sections else "no patch sections"
+    # The 16 section offsets begin at +0x34.  Adjust every section after the
+    # LOD group exactly as the community updater does before replacing bytes.
+    for index in range(16):
+        offset_position = 0x34 + index * 4
+        if offset_position + 4 > len(patch_data):
+            break
+        offset = struct.unpack_from("<I", patch_data, offset_position)[0]
+        if offset != 0 and offset > patch_lod_offset:
+            struct.pack_into("<I", patch_data, offset_position, offset + size_difference)
+
+    patch_data[patch_lod_offset:patch_joint_offset] = source_lod_data
+    struct.pack_into("<I", patch_data, 0x2C, source_version)
+
+    new_entry = entry.clone()
+    new_entry.toc_data = bytes(patch_data)
     log_message(
         log,
-        f"IDSWAP source rebuild for Unit {entry.file_id} from {source_name} entry "
-        f"{source_entry.file_id}; preserved {preserved_text}",
+        f"IDSWAP community-compatible Unit migration for {entry.file_id} from "
+        f"{source_name} entry {source_entry.file_id}; preserved patch GPU/stream and non-LOD Unit bytes",
     )
     return new_entry, "idswap-source"
 

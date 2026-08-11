@@ -165,6 +165,11 @@ IDSWAP_PATCH_SECTION_OVERRIDES = (
     "customization_info",
     "connecting_bone_hash",
 )
+
+# A source archive is an optional hint for true ID-swap geometry.  Weapon
+# patches also contain target-only scaffolding Units, so a weak resemblance is
+# not enough to safely borrow its LOD group from the source model.
+IDSWAP_SOURCE_MATCH_MIN_SCORE = 60
 #endregion Module Helpers And Constants
 
 
@@ -2158,14 +2163,22 @@ def create_fixed_patch(
             matched_entry = match["entry"]
             matched_similarity = match["similarity"]
             matched_source_name = match["name"]
+            if matched_similarity.score < IDSWAP_SOURCE_MATCH_MIN_SCORE:
+                log_message(
+                    log,
+                    f"IDSWAP source hint ignored for Unit {unit_entry.file_id}: "
+                    f"best source entry {matched_entry.file_id} scored "
+                    f"{matched_similarity.score} (< {IDSWAP_SOURCE_MATCH_MIN_SCORE}); "
+                    "using the current game Unit with the same ID instead.",
+                )
+                continue
             idswap_source_matches[int(unit_entry.file_id)] = {
                 "entry": matched_entry,
                 "name": matched_source_name,
             }
-            confidence = "low confidence" if matched_similarity.score < 50 else "matched"
             log_message(
                 log,
-                f"IDSWAP source {confidence} for Unit {unit_entry.file_id}: "
+                f"IDSWAP source matched for Unit {unit_entry.file_id}: "
                 f"{matched_entry.file_id} from {matched_source_name} "
                 f"(score {matched_similarity.score}; {', '.join(matched_similarity.reasons)})",
             )
@@ -2220,6 +2233,30 @@ def create_fixed_patch(
                     idswap_source_matches[int(entry.file_id)]["name"],
                     log=log,
                 )
+            elif entry.type_id == UnitID:
+                current_entry, current_name = resolve_unit_source_entry(
+                    entry.file_id,
+                    default_archive,
+                    archive_index=archive_index,
+                )
+                if current_entry is None:
+                    new_entry, mode = build_entry_from_source(
+                        entry,
+                        raw_fallback_for_unsupported=raw_fallback_for_unsupported,
+                        default_archive=default_archive,
+                        archive_index=archive_index,
+                        log=log,
+                        unit_header_only=unit_header_only_mode,
+                        unit_passthrough=unit_passthrough_mode,
+                    )
+                else:
+                    new_entry, mode = rebuild_idswap_unit_from_source_archive(
+                        entry,
+                        current_entry,
+                        current_name,
+                        log=log,
+                    )
+                    mode = "unit-current-game"
             else:
                 new_entry, mode = build_entry_from_source(
                     entry,

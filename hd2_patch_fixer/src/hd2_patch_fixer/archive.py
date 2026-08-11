@@ -1826,6 +1826,7 @@ def rebuild_idswap_unit_from_source_archive(
     entry,
     source_entry,
     source_name: str,
+    replace_lod_group: bool = True,
     log=None,
 ):
     """Apply the community Unit updater's surgical ID-swap migration.
@@ -1843,11 +1844,6 @@ def rebuild_idswap_unit_from_source_archive(
         raise ValueError("Unit payload is too small for ID swap migration")
 
     source_version = struct.unpack_from("<I", source_data, 0x2C)[0]
-    source_lod_offset, source_joint_offset = struct.unpack_from("<II", source_data, 0x30)
-    if not (0 <= source_lod_offset <= source_joint_offset <= len(source_data)):
-        raise ValueError("Source Unit has invalid LOD-group bounds")
-    source_lod_data = source_data[source_lod_offset:source_joint_offset]
-
     patch_version = struct.unpack_from("<I", patch_data, 0x2C)[0]
     if patch_version < 0xA4CD36:
         layout_list_offset = struct.unpack_from("<I", patch_data, 0x5C)[0]
@@ -1868,22 +1864,29 @@ def rebuild_idswap_unit_from_source_archive(
                 if item_format > 16:
                     struct.pack_into("<I", patch_data, format_offset, item_format + 4)
 
-    patch_lod_offset, patch_joint_offset = struct.unpack_from("<II", patch_data, 0x30)
-    if not (0 <= patch_lod_offset <= patch_joint_offset <= len(patch_data)):
-        raise ValueError("Patch Unit has invalid LOD-group bounds")
-    size_difference = len(source_lod_data) - (patch_joint_offset - patch_lod_offset)
+    if replace_lod_group:
+        source_lod_offset, source_joint_offset = struct.unpack_from("<II", source_data, 0x30)
+        if not (0 <= source_lod_offset <= source_joint_offset <= len(source_data)):
+            raise ValueError("Source Unit has invalid LOD-group bounds")
+        source_lod_data = source_data[source_lod_offset:source_joint_offset]
 
-    # The 16 section offsets begin at +0x34.  Adjust every section after the
-    # LOD group exactly as the community updater does before replacing bytes.
-    for index in range(16):
-        offset_position = 0x34 + index * 4
-        if offset_position + 4 > len(patch_data):
-            break
-        offset = struct.unpack_from("<I", patch_data, offset_position)[0]
-        if offset != 0 and offset > patch_lod_offset:
-            struct.pack_into("<I", patch_data, offset_position, offset + size_difference)
+        patch_lod_offset, patch_joint_offset = struct.unpack_from("<II", patch_data, 0x30)
+        if not (0 <= patch_lod_offset <= patch_joint_offset <= len(patch_data)):
+            raise ValueError("Patch Unit has invalid LOD-group bounds")
+        size_difference = len(source_lod_data) - (patch_joint_offset - patch_lod_offset)
 
-    patch_data[patch_lod_offset:patch_joint_offset] = source_lod_data
+        # The 16 section offsets begin at +0x34.  Adjust every section after
+        # the LOD group exactly as the community updater does before replacing
+        # bytes.
+        for index in range(16):
+            offset_position = 0x34 + index * 4
+            if offset_position + 4 > len(patch_data):
+                break
+            offset = struct.unpack_from("<I", patch_data, offset_position)[0]
+            if offset != 0 and offset > patch_lod_offset:
+                struct.pack_into("<I", patch_data, offset_position, offset + size_difference)
+
+        patch_data[patch_lod_offset:patch_joint_offset] = source_lod_data
     struct.pack_into("<I", patch_data, 0x2C, source_version)
 
     new_entry = entry.clone()
@@ -1891,7 +1894,8 @@ def rebuild_idswap_unit_from_source_archive(
     log_message(
         log,
         f"IDSWAP community-compatible Unit migration for {entry.file_id} from "
-        f"{source_name} entry {source_entry.file_id}; preserved patch GPU/stream and non-LOD Unit bytes",
+        f"{source_name} entry {source_entry.file_id}; preserved patch GPU/stream and "
+        f"{'non-LOD Unit bytes' if replace_lod_group else 'the patch LOD group and other Unit bytes'}",
     )
     return new_entry, "idswap-source"
 
@@ -2254,6 +2258,7 @@ def create_fixed_patch(
                         entry,
                         current_entry,
                         current_name,
+                        replace_lod_group=not bool(idswap_source_archives),
                         log=log,
                     )
                     mode = "unit-current-game"

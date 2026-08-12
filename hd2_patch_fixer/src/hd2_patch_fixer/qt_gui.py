@@ -365,7 +365,14 @@ class PatchFixerWindow(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(8)
-        layout.addWidget(QLabel("DATA TYPES TO KEEP", objectName="eyebrow"))
+        heading = QHBoxLayout()
+        heading.addWidget(QLabel("DATA TYPES TO KEEP", objectName="eyebrow"))
+        heading.addWidget(QLabel(
+            "(Using for debugging, should have keep they all enable unless you khow what you are doing)",
+            objectName="muted",
+        ))
+        heading.addStretch()
+        layout.addLayout(heading)
         tools = QHBoxLayout()
         select_all = QPushButton("Select all")
         clear_all = QPushButton("Clear all")

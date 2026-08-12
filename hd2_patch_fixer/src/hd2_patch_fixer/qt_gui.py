@@ -391,16 +391,10 @@ class PatchFixerWindow(QMainWindow):
         self.raw_fallback.setChecked(True)
         self.weapon_swap_mode = QCheckBox("Safe automatic Weapon ID Swap migration")
         self.weapon_swap_mode.setChecked(True)
-        self.audio_migration = QCheckBox("Aggressive Audio migration — merge Wwise Banks into current game archives")
         layout.addWidget(self.raw_fallback)
         layout.addWidget(self.weapon_swap_mode)
         layout.addWidget(QLabel(
             "Only verified rigged weapon swaps use this mode. Armor and helmet patches keep the original patch-tool repair path.",
-            objectName="muted",
-        ))
-        layout.addWidget(self.audio_migration)
-        layout.addWidget(QLabel(
-            "The audio option uses the community audio engine. A patch made on an old game build can reapply old vanilla WEM data.",
             objectName="muted",
         ))
         return card
@@ -514,7 +508,9 @@ class PatchFixerWindow(QMainWindow):
             return self.fail("Choose valid input and output paths.")
         keep_unknown = self.keep_unknown.isChecked()
         raw_fallback = self.raw_fallback.isChecked()
-        migrate_audio = self.audio_migration.isChecked()
+        # Audio migration is mandatory: broken Wwise patches require the
+        # current-game Bank/Stream merge and should never silently raw-copy.
+        migrate_audio = True
         weapon_swap_mode = self.weapon_swap_mode.isChecked()
         idswap_source_archive = self.idswap_source_archive_value()
         self.run_button.setEnabled(False); self.status.setText("MIGRATING"); self.append_log("Starting patch migration…")

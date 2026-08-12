@@ -5,13 +5,12 @@ import logic required to move a sound mod onto the current game archives.  It
 also includes a GUI and audio-preview dependencies that are not appropriate
 for the patch fixer.  This module loads only that supplied engine at runtime,
 stubs its optional preview dependencies, and exposes a small headless API for
-an explicit, community-compatible semantic merge mode.
+the patcher's always-on, community-compatible semantic merge mode.
 
 This is deliberately *not* a byte-preserving repair path.  The community
 engine overlays selected HIRC fields from the mod onto the current game's
-Bank hierarchy and therefore needs a user-facing opt-in plus a backup of the
-original patch.  The ordinary fixer should continue to use its safe raw audio
-preservation path by default.
+Bank hierarchy. The ordinary fixer uses raw audio preservation only when a
+Bank cannot be matched to a current game archive.
 
 The community source remains a data directory rather than an ordinary package
 on purpose: it keeps the original sources intact and makes updates from the

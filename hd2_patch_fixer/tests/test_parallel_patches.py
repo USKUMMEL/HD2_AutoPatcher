@@ -48,6 +48,7 @@ class ParallelPatchTests(unittest.TestCase):
 
             with (
                 patch("hd2_patch_fixer.archive.slim_init") as slim_init,
+                patch("hd2_patch_fixer.archive.StreamToc.from_file", return_value=True),
                 patch("hd2_patch_fixer.archive.extract_archive_file"),
                 patch("hd2_patch_fixer.archive.find_patch_groups", side_effect=fake_groups),
                 patch("hd2_patch_fixer.archive.create_fixed_patch", side_effect=fake_patch_fix),

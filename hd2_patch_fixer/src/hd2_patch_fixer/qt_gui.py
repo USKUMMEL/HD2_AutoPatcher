@@ -410,7 +410,7 @@ class PatchFixerWindow(QMainWindow):
         return card
 
     def log_card(self):
-        card = self.card(); layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.addWidget(QLabel("MIGRATION LOG", objectName="eyebrow")); self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setPlainText("Ready. Choose a game folder and mod patch."); layout.addWidget(self.log); return card
+        card = self.card(); layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.addWidget(QLabel("MIGRATION LOG", objectName="eyebrow")); self.log = QTextEdit(); self.log.setReadOnly(True); self.log.document().setMaximumBlockCount(2_000); self.log.setPlainText("Ready. Choose a game folder and mod patch."); layout.addWidget(self.log); return card
 
     def parallel_patches_card(self):
         """Small, explicit concurrency control for multi-patch mod archives."""
@@ -427,7 +427,7 @@ class PatchFixerWindow(QMainWindow):
         self.parallel_value.setFixedWidth(32)
         self.parallel_plus = QPushButton("+")
         self.parallel_plus.setFixedWidth(34)
-        self.parallel_limit = max(1, min(8, os.cpu_count() or 4))
+        self.parallel_limit = max(1, min(4, os.cpu_count() or 4))
         self.parallel_patch_count = 1
         self.parallel_minus.clicked.connect(lambda: self.change_parallel_patch_count(-1))
         self.parallel_plus.clicked.connect(lambda: self.change_parallel_patch_count(1))
@@ -437,7 +437,7 @@ class PatchFixerWindow(QMainWindow):
         row.addStretch()
         layout.addLayout(row)
         self.parallel_hint = QLabel(
-            "How much patch it will fix at the same time, more number fix faster but also use more system resource but not much.",
+            "How much patch it will fix at the same time, more number fix faster but also use more system resource.",
             objectName="muted",
         )
         self.parallel_hint.setWordWrap(True)
@@ -457,7 +457,7 @@ class PatchFixerWindow(QMainWindow):
             self.parallel_plus.setEnabled(parallel_available and self.parallel_patch_count < self.parallel_limit)
             self.parallel_value.setEnabled(parallel_available)
             self.parallel_hint.setText(
-                "How much patch it will fix at the same time, more number fix faster but also use more system resource but not much."
+                "How much patch it will fix at the same time, more number fix faster but also use more system resource."
                 if parallel_available
                 else "Single Patch processes one patch file at a time."
             )
@@ -498,7 +498,7 @@ class PatchFixerWindow(QMainWindow):
         value, _ = QFileDialog.getOpenFileName(self, "Select compressed mod", self.mod_path.text(), "Mod archives (*.zip *.7z *.rar)")
         if value:
             self.mod_path.setText(value)
-            if not self.zip_path.text(): self.zip_path.setText(str(Path(value).with_name(f"{Path(value).stem}_fixed.zip")))
+            self.zip_path.setText(str(Path(value).with_name(f"{Path(value).stem}_fixed.zip")))
 
     def browse_zip(self):
         value, _ = QFileDialog.getSaveFileName(self, "Select output zip", self.zip_path.text() or "fixed_mod.zip", "Zip archive (*.zip)")

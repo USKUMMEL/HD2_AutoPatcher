@@ -1,10 +1,12 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc
 import os
 import shutil
 import struct
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
@@ -718,7 +720,17 @@ class StreamToc:
         self.toc_file = MemoryStream(toc_data)
         self.gpu_file = MemoryStream(gpu_data)
         self.stream_file = MemoryStream(stream_data)
-        return self.serialize(serialize_data)
+        parsed = self.serialize(serialize_data)
+        # ``serialize_data`` copies each resource into its TocEntry.  Keeping
+        # the three whole source package buffers as well doubles (or triples)
+        # memory use for a Slim archive, where a reconstructed stream sidecar
+        # can be hundreds of megabytes.  No caller needs these read buffers
+        # after parsing; ``to_file`` creates fresh write buffers later.
+        if serialize_data:
+            self.toc_file = MemoryStream()
+            self.gpu_file = MemoryStream()
+            self.stream_file = MemoryStream()
+        return parsed
 
     def to_file(self, path=None):
         self.toc_file = MemoryStream(io_mode="write")
@@ -806,36 +818,48 @@ class GameArchiveIndex:
     def __init__(self, game_data_folder: str):
         self.game_data_folder = game_data_folder
         self.search_archives = []
-        self.archive_cache = {}
+        self._build_lock = threading.Lock()
+        self._unit_entry_cache = {}
+        self._unit_entry_lock = threading.Lock()
 
     def build(self):
         if self.search_archives:
             return
 
-        game_path = Path(self.game_data_folder)
-        if is_slim_version():
-            bundle_database_path = game_path / "bundle_database.data"
-            with open(bundle_database_path, "rb") as file_obj:
-                data = file_obj.read()
-            num_packages = int.from_bytes(data[4:8], "little")
-            for index in range(num_packages):
-                offset = 0x10 + 0x33 * index
-                name = data[offset:offset + 0x33].decode(errors="ignore").split("\x17")[0]
-                if not name:
-                    continue
-                search_toc = SearchToc()
-                full_path = str(game_path / name)
-                if search_toc.from_slim_file(full_path):
-                    self.search_archives.append(search_toc)
-        else:
-            for root, _dirs, files in os.walk(game_path):
-                for name in files:
-                    if Path(name).suffix != "":
+        # A compressed mod may have several workers sharing this read-only
+        # index.  Build it exactly once and publish the finished list
+        # atomically; each worker otherwise allocated its own 3k-archive TOC
+        # index even when Parallel Patches was set low.
+        with self._build_lock:
+            if self.search_archives:
+                return
+
+            discovered_archives = []
+            game_path = Path(self.game_data_folder)
+            if is_slim_version():
+                bundle_database_path = game_path / "bundle_database.data"
+                with open(bundle_database_path, "rb") as file_obj:
+                    data = file_obj.read()
+                num_packages = int.from_bytes(data[4:8], "little")
+                for index in range(num_packages):
+                    offset = 0x10 + 0x33 * index
+                    name = data[offset:offset + 0x33].decode(errors="ignore").split("\x17")[0]
+                    if not name:
                         continue
-                    full_path = os.path.join(root, name)
                     search_toc = SearchToc()
-                    if search_toc.from_file(full_path):
-                        self.search_archives.append(search_toc)
+                    full_path = str(game_path / name)
+                    if search_toc.from_slim_file(full_path):
+                        discovered_archives.append(search_toc)
+            else:
+                for root, _dirs, files in os.walk(game_path):
+                    for name in files:
+                        if Path(name).suffix != "":
+                            continue
+                        full_path = os.path.join(root, name)
+                        search_toc = SearchToc()
+                        if search_toc.from_file(full_path):
+                            discovered_archives.append(search_toc)
+            self.search_archives = discovered_archives
 
     def find_archive_path(self, file_id: int, type_id: int):
         self.build()
@@ -888,14 +912,51 @@ class GameArchiveIndex:
         return self.find_archive_paths(bank_ids, WwiseBankID)
 
     def load_archive(self, archive_path: str):
-        archive = self.archive_cache.get(archive_path)
-        if archive is not None:
-            return archive
+        """Load one archive for an immediate lookup without retaining it.
+
+        A cached ``StreamToc`` owns all entries from its source archive,
+        including GPU and stream payloads.  Retaining those reconstructed Slim
+        packages made memory grow with every source lookup.  Returned entries
+        are self-contained, so callers can keep the one entry they need while
+        the full archive is released as soon as the lookup completes.
+        """
         archive = StreamToc()
         if not archive.from_file(str(archive_path)):
             return None
-        self.archive_cache[archive_path] = archive
         return archive
+
+    def find_unit_entry(self, file_id: int):
+        """Return a compact current-game Unit entry for repeated lookups.
+
+        A large weapon manifest repeatedly references the same base Units.
+        Loading the owning Slim package for every patch causes hundreds of
+        full package reconstructions; the Python allocator can retain those
+        large transient blocks for the rest of the run.  Cache only a Unit's
+        TOC payload (the normalizer never needs the source GPU/stream bytes),
+        not the full source archive or its sidecars.
+        """
+        file_id = int(file_id)
+        with self._unit_entry_lock:
+            cached = self._unit_entry_cache.get(file_id)
+            if cached is not None:
+                return cached
+
+            archive_path = self.find_archive_path(file_id, UnitID)
+            if archive_path is None:
+                return None, None
+            archive = self.load_archive(archive_path)
+            if archive is None:
+                return None, None
+            entry = archive.get_entry(file_id, UnitID)
+            if entry is None:
+                return None, None
+
+            compact_entry = entry.clone()
+            compact_entry.gpu_data = b""
+            compact_entry.stream_data = b""
+            result = (compact_entry, f"game archive {Path(archive_path).name}")
+            self._unit_entry_cache[file_id] = result
+            return result
 
     def iter_entries(self, type_id: int):
         self.build()
@@ -1414,13 +1475,9 @@ def resolve_unit_source_entry(
     if default_entry is not None:
         return default_entry, "default archive"
     if archive_index is not None:
-        archive_path = archive_index.find_archive_path(unit_id, UnitID)
-        if archive_path is not None:
-            archive = StreamToc()
-            if archive.from_file(str(archive_path)):
-                entry = archive.get_entry(unit_id, UnitID)
-                if entry is not None:
-                    return entry, f"game archive {Path(archive_path).name}"
+        entry, source_name = archive_index.find_unit_entry(unit_id)
+        if entry is not None:
+            return entry, source_name
     return None, None
 
 
@@ -1926,6 +1983,12 @@ def repair_unit_material_bindings_from_source(
         or entry_meshes is None
         or len(source_materials) < 4
         or len(entry_materials) < 4
+        # A different table size means this is not a small vanilla material
+        # ID update.  Custom weapon meshes can carry their own extra material
+        # slots even when the patch does not include Material entries.  Using
+        # the shorter vanilla table then remaps textures across the mesh and
+        # looks exactly like broken UVs.
+        or len(source_materials) != len(entry_materials)
         or len(source_meshes.mesh_infos) != len(entry_meshes.mesh_infos)
     ):
         return False
@@ -2378,6 +2441,8 @@ def create_fixed_patch(
     idswap_source_archive: str | None = None,
     log=None,
     slim_initialized: bool = False,
+    archive_index: GameArchiveIndex | None = None,
+    default_archive: StreamToc | None = None,
 ):
     broken_patch_path = normalize_archive_selection(broken_patch_path)
     if not Path(game_data_folder).is_dir():
@@ -2392,17 +2457,20 @@ def create_fixed_patch(
     # rebuilding that global read-only map inside every worker is wasteful.
     if not slim_initialized:
         slim_init(game_data_folder)
-    archive_index = (
-        GameArchiveIndex(game_data_folder)
-        if auto_include_unit_dependencies or migrate_audio or weapon_swap_mode
-        else None
+    needs_archive_index = (
+        auto_include_unit_dependencies or migrate_audio or weapon_swap_mode
     )
+    if not needs_archive_index:
+        archive_index = None
+    elif archive_index is None:
+        archive_index = GameArchiveIndex(game_data_folder)
 
-    default_archive_path = str(Path(game_data_folder) / BaseArchiveHexID)
-    log_message(log, f"Loading default archive: {default_archive_path}")
-    default_archive = StreamToc()
-    if not default_archive.from_file(default_archive_path):
-        raise ValueError("Failed to load default archive from the selected game folder.")
+    if default_archive is None:
+        default_archive_path = str(Path(game_data_folder) / BaseArchiveHexID)
+        log_message(log, f"Loading default archive: {default_archive_path}")
+        default_archive = StreamToc()
+        if not default_archive.from_file(default_archive_path):
+            raise ValueError("Failed to load default archive from the selected game folder.")
 
     log_message(log, f"Loading broken patch: {broken_patch_path}")
     broken_patch = StreamToc()
@@ -2726,6 +2794,14 @@ def create_fixed_mod_archive(
     # Slim package metadata is global in the community reader.  Build it once
     # before worker threads begin; all patch workers only read it afterwards.
     slim_init(game_data_folder)
+    default_archive_path = str(Path(game_data_folder) / BaseArchiveHexID)
+    log_message(log, f"Loading shared default archive: {default_archive_path}")
+    shared_default_archive = StreamToc()
+    if not shared_default_archive.from_file(default_archive_path):
+        raise ValueError("Failed to load default archive from the selected game folder.")
+    # Keep only one lightweight TOC index for the whole compressed mod.  It
+    # has no full-archive cache, so it is safe to share between worker threads.
+    shared_archive_index = GameArchiveIndex(game_data_folder)
 
     with tempfile.TemporaryDirectory(prefix="hd2_patch_fixer_") as temp_dir:
         extract_dir = str(Path(temp_dir) / "mod")
@@ -2745,6 +2821,17 @@ def create_fixed_mod_archive(
         log_message(log, f"Found {len(patch_paths)} patch file(s) inside compressed mod archive.")
 
         worker_count = min(max_workers, len(patch_paths))
+        # Large manifests repeatedly reconstruct different current-game
+        # packages.  Four concurrent reconstructions can momentarily require
+        # several GB even though each patch file itself is small.  Preserve
+        # the user's selected parallelism for normal mods, but bound very
+        # large manifests to two workers so the UI cannot exhaust RAM.
+        if len(patch_paths) > 32 and worker_count > 2:
+            worker_count = 2
+            log_message(
+                log,
+                "MEMORY-SAFE MODE: Large manifest detected; using 2 parallel patch workers.",
+            )
         if worker_count > 1:
             log_message(log, f"Processing up to {worker_count} patch files in parallel.")
 
@@ -2765,6 +2852,8 @@ def create_fixed_mod_archive(
                 idswap_source_archive=idswap_source_archive,
                 log=log,
                 slim_initialized=True,
+                archive_index=shared_archive_index,
+                default_archive=shared_default_archive,
             )
             return {
                 "relative_path": str(relative_path).replace("\\", "/"),
@@ -2776,16 +2865,35 @@ def create_fixed_mod_archive(
         if worker_count == 1:
             for patch_path in patch_paths:
                 fixed_patch_results.append(fix_one_patch(patch_path))
+                gc.collect()
         else:
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = [executor.submit(fix_one_patch, patch_path) for patch_path in patch_paths]
-                for future in as_completed(futures):
-                    fixed_patch_results.append(future.result())
+            # Do not keep the same worker threads alive for an entire large
+            # manifest.  Python/native allocators retain per-thread arenas
+            # from reconstructed package buffers; with 80+ patches this grew
+            # into several GB even though only four jobs ran at once.  Small
+            # batches retain the requested parallelism, then release worker
+            # arenas and collect temporary parser graphs before the next set.
+            for start_index in range(0, len(patch_paths), worker_count):
+                patch_batch = patch_paths[start_index:start_index + worker_count]
+                with ThreadPoolExecutor(max_workers=len(patch_batch)) as executor:
+                    futures = [
+                        executor.submit(fix_one_patch, patch_path)
+                        for patch_path in patch_batch
+                    ]
+                    for future in as_completed(futures):
+                        fixed_patch_results.append(future.result())
+                gc.collect()
 
         fixed_patch_results.sort(key=lambda result: result["relative_path"])
 
         log_message(log, f"Creating fixed compressed mod zip: {output_zip_path}")
         create_zip_from_directory(extract_dir, output_zip_path)
+
+    # The index contains only TOC headers, but explicitly dropping it after a
+    # large manifest helps CPython return cyclic temporary objects promptly.
+    del shared_archive_index
+    del shared_default_archive
+    gc.collect()
 
     return {
         "output_path": output_zip_path,

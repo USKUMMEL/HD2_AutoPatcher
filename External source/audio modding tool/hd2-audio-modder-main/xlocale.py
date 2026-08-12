@@ -1,0 +1,28 @@
+LANGUAGE_MAPPING = ({
+    "English (US)" : 0x03f97b57,
+    "English (UK)" : 0x6f4515cb,
+    "Français" : 4271961631,
+    "Português (Brasil)": 1861586415,
+    "Português (Europa)": 1244441033,
+    "Polski": 260593578,
+    "日本語": 2427891497,
+    "繁體中文": 2663028010,
+    "简体中文": 1497550071,
+    "Nederlands": 291057413,
+    "한국어": 3151476177,
+    "Español (Castellano)": 830498882,
+    "Español (LatinoAmérica)": 3854981686,
+    "Deutsch": 3124347884,
+    "Italiano": 3808107213,
+    "Русский": 3317373165
+})
+
+
+def language_lookup(lang_string):
+    try:
+        return LANGUAGE_MAPPING[lang_string]
+    except:
+        return int(lang_string)
+
+
+language = 0

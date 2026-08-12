@@ -21,6 +21,7 @@ community project easy to audit.  ``build.bat`` bundles that directory under
 from __future__ import annotations
 
 import importlib
+import gc
 import os
 import sys
 import threading
@@ -42,6 +43,10 @@ _REQUIRED_COMMUNITY_FILES = (
     "core.py",
     "slim.py",
     "util.py",
+    "const.py",
+    "env.py",
+    "fileutil.py",
+    "xlocale.py",
     "wwise_hierarchy_140.py",
     "wwise_hierarchy_154.py",
     "backend/db.py",
@@ -123,6 +128,7 @@ _IMPORT_LOCK = threading.RLock()
 _COMMUNITY_LOGGER = _CommunityLoggerBridge()
 _LOADED_CORE: ModuleType | None = None
 _LOADED_SOURCE: Path | None = None
+_COMMUNITY_SLIM_GAME_DATA: Path | None = None
 _MISSING = object()
 
 
@@ -367,14 +373,19 @@ def migrate_audio_patch_with_community_engine(
         if game_data_folder is not None:
             if slim_module is None or not hasattr(slim_module, "slim_init"):
                 raise CommunityAudioAdapterError("Community slim loader was not initialized correctly.")
-            try:
-                slim_module.slim_init(str(Path(game_data_folder).expanduser().resolve()))
-            except Exception as exc:
-                raise CommunityAudioAdapterError(
-                    f"Failed to initialize the community loader for {game_data_folder}: {exc}"
-                ) from exc
+            resolved_game_data = Path(game_data_folder).expanduser().resolve()
+            global _COMMUNITY_SLIM_GAME_DATA
+            if _COMMUNITY_SLIM_GAME_DATA != resolved_game_data:
+                try:
+                    slim_module.slim_init(str(resolved_game_data))
+                except Exception as exc:
+                    raise CommunityAudioAdapterError(
+                        f"Failed to initialize the community loader for {game_data_folder}: {exc}"
+                    ) from exc
+                _COMMUNITY_SLIM_GAME_DATA = resolved_game_data
 
         with _COMMUNITY_LOGGER.use_callback(log):
+            mod = None
             try:
                 mod = core.Mod("HD2 Patch Fixer audio migration", None)
                 for archive_path in base_archives:
@@ -417,6 +428,18 @@ def migrate_audio_patch_with_community_engine(
                 raise CommunityAudioAdapterError(
                     f"Community audio migration failed: {exc}"
                 ) from exc
+            finally:
+                # Upstream audio objects reference banks, hierarchy entries,
+                # streams, and parents cyclically.  A long manifest otherwise
+                # waits for Python's periodic GC and looks like a RAM leak.
+                # Clear their dictionaries before moving to the next patch.
+                if mod is not None:
+                    try:
+                        mod.remove_all_game_archives()
+                    except Exception:
+                        pass
+                del mod
+                gc.collect()
 
     if not target_patch.is_file():
         raise CommunityAudioAdapterError(

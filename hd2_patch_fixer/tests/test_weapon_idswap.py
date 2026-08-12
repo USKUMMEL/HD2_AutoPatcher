@@ -14,6 +14,7 @@ from hd2_patch_fixer.archive import (  # noqa: E402
     is_static_unit,
     migrate_static_unit_idswap_unit,
     migrate_weapon_idswap_unit,
+    validate_unit_dependencies,
 )
 from hd2_patch_fixer.constants import UnitID  # noqa: E402
 
@@ -338,6 +339,26 @@ class WeaponIdSwapTests(unittest.TestCase):
         # are reconstructed or sourced from the target Unit.
         first_component_format = _u32(migrated.toc_data, _u32(migrated.toc_data, 0x5C) + 16 + 4)
         self.assertEqual(first_component_format, 0x1E)
+
+    def test_current_game_dangling_reference_is_not_a_patch_validation_error(self):
+        """A current Unit can carry a non-resource self StateMachine ref."""
+        target_id = 0x503C0E01FBAFA86A
+        patch_unit = _unit_entry(
+            target_id,
+            state_machine_ref=target_id,
+        )
+        current_game_unit = _unit_entry(
+            target_id,
+            version=CURRENT_UNIT_VERSION,
+            state_machine_ref=target_id,
+        )
+
+        unresolved = validate_unit_dependencies(
+            _archive(patch_unit),
+            default_archive=_archive(current_game_unit),
+        )
+
+        self.assertEqual(unresolved, [])
 
 
 if __name__ == "__main__":

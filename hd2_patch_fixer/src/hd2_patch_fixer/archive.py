@@ -2300,6 +2300,34 @@ def resolve_dependency_entry(
     return None, None
 
 
+def is_inherited_current_unit_reference(
+    unit_entry,
+    ref_name: str,
+    ref_id: int,
+    default_archive: StreamToc,
+    archive_index: GameArchiveIndex | None = None,
+):
+    """Whether a missing Unit reference already exists in the current game.
+
+    Some shipped Units contain a nonzero reference which has no standalone
+    resource of the expected type.  Railgun's auxiliary Unit is one example:
+    its current-game Unit has the same self StateMachine reference, while no
+    State Machine resource with that ID exists.  Treating that inherited
+    vanilla layout as a hard patch error makes a valid patch impossible to
+    export.  This intentionally permits it only when the current Unit with
+    the *same file ID* contains the exact same reference.
+    """
+    current_unit, source_name = resolve_unit_source_entry(
+        unit_entry.file_id,
+        default_archive,
+        archive_index=archive_index,
+    )
+    if current_unit is None:
+        return False, None
+    current_refs = parse_unit_refs(current_unit)
+    return current_refs.get(ref_name) == ref_id, source_name
+
+
 def add_unit_dependencies(
     fixed_patch: StreamToc,
     broken_patch: StreamToc,
@@ -2324,6 +2352,21 @@ def add_unit_dependencies(
             if ref_id == 0:
                 continue
             if fixed_patch.get_entry(ref_id, type_id) is not None:
+                continue
+
+            inherited, inherited_source = is_inherited_current_unit_reference(
+                unit_entry,
+                ref_name,
+                ref_id,
+                default_archive,
+                archive_index=archive_index,
+            )
+            if inherited:
+                log_message(
+                    log,
+                    f"INHERITED current-game {label} reference for unit {unit_entry.file_id}: "
+                    f"{ref_id} from {inherited_source}; leaving it external.",
+                )
                 continue
 
             source_entry = broken_patch.get_entry(ref_id, type_id)
@@ -2390,6 +2433,16 @@ def validate_unit_dependencies(
                 continue
             if archive_index is not None and archive_index.find_archive_path(ref_id, type_id) is not None:
                 continue
+            if default_archive is not None:
+                inherited, _source_name = is_inherited_current_unit_reference(
+                    unit_entry,
+                    ref_name,
+                    ref_id,
+                    default_archive,
+                    archive_index=archive_index,
+                )
+                if inherited:
+                    continue
             unresolved.append((unit_entry.file_id, label, ref_id))
     return unresolved
 #endregion Dependency Resolution

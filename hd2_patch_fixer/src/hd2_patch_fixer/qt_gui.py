@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from .archive import create_fixed_mod_archive, create_fixed_patch, normalize_archive_selection
 from .archive_catalog import installed_archive_ids, load_archive_catalog
 from .constants import TYPE_LABELS
+from .settings import load_preferences, save_preferences
 
 
 THEME = """
@@ -148,7 +149,9 @@ class PatchFixerWindow(QMainWindow):
         self.signals.failed.connect(self.fail)
         self.type_checks = {}
         self.idswap_source_archive_ids = []
+        self.preferences = load_preferences()
         self.build_ui()
+        self.restore_preferences()
 
     def build_ui(self):
         root = QWidget(objectName="root"); self.setCentralWidget(root)
@@ -202,6 +205,15 @@ class PatchFixerWindow(QMainWindow):
 
     def nav_button(self, text, checked=False):
         button = QPushButton(text); button.setCheckable(True); button.setChecked(checked); return button
+
+    def restore_preferences(self):
+        game_data_folder = self.preferences.get("gameDataFolder")
+        if isinstance(game_data_folder, str) and Path(game_data_folder).is_dir():
+            self.game_path.setText(game_data_folder)
+
+    def save_game_data_folder(self, game_data_folder):
+        self.preferences["gameDataFolder"] = game_data_folder
+        save_preferences(self.preferences)
 
     def card(self):
         card = QFrame(objectName="card"); card.setContentsMargins(0, 0, 0, 0); return card
@@ -452,7 +464,9 @@ class PatchFixerWindow(QMainWindow):
 
     def browse_game(self):
         value = QFileDialog.getExistingDirectory(self, "Select Helldivers 2 data folder", self.game_path.text());
-        if value: self.game_path.setText(value)
+        if value:
+            self.game_path.setText(value)
+            self.save_game_data_folder(value)
 
     def browse_patch(self):
         value, _ = QFileDialog.getOpenFileName(self, "Select patch", self.patch_path.text(), "Patch files (*)")
@@ -479,6 +493,7 @@ class PatchFixerWindow(QMainWindow):
         game = self.game_path.text().strip(); keep = {type_id for type_id, check in self.type_checks.items() if check.isChecked()}
         if not Path(game).is_dir() or (not keep and not self.keep_unknown.isChecked()):
             return self.fail("Choose a valid game folder and at least one type (or keep unknown types).")
+        self.save_game_data_folder(game)
         archive_mode = self.stack.currentIndex() == 1
         source = self.mod_path.text().strip() if archive_mode else self.patch_path.text().strip(); target = self.zip_path.text().strip() if archive_mode else self.export_path.text().strip()
         if not Path(source).is_file() or (archive_mode and not target) or (not archive_mode and not Path(target).is_dir()):

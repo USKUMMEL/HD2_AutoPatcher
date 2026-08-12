@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import struct
 from pathlib import Path
 from urllib.request import urlopen
+
+from .settings import app_data_directory
 
 
 ARCHIVE_LIST_URL = (
@@ -18,8 +19,7 @@ ARCHIVE_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 
 
 def catalog_cache_path() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "HD2 Patch Fixer" / "archivehashes.json"
+    return app_data_directory() / "archivehashes.json"
 
 
 def parse_archive_catalog(raw_data) -> dict[str, str]:

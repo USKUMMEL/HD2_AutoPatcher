@@ -11,11 +11,13 @@ from PySide6.QtCore import QObject, Signal, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .archive import create_fixed_mod_archive, create_fixed_patch, normalize_archive_selection
+from .archive_catalog import installed_archive_ids, load_archive_catalog
 from .constants import TYPE_LABELS
 
 
@@ -34,6 +36,8 @@ QPushButton#accent:hover { background: #9AC2A7; } QPushButton:disabled { color: 
 QFrame#archiveToken { background: #292E33; border: 1px solid #526058; border-radius: 4px; }
 QPushButton#tokenRemove { min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px; padding: 0; border: 0; background: transparent; color: #B8C2BC; font-size: 15px; }
 QPushButton#tokenRemove:hover { color: #FFFFFF; background: #4A3434; }
+QListWidget { background: #171A1D; border: 1px solid #3B4449; border-radius: 4px; padding: 3px; }
+QListWidget::item { padding: 7px; border-radius: 3px; } QListWidget::item:hover, QListWidget::item:selected { background: #31383D; }
 QCheckBox { spacing: 7px; color: #E4E9E5; background: transparent; } QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #526058; border-radius: 3px; background: #171A1D; }
 QCheckBox::indicator:checked { background: #7EAC90; border-color: #9AC2A7; } QScrollArea { border: 0; } QScrollBar:vertical { width: 10px; background: #202428; } QScrollBar::handle:vertical { background: #3B4449; border-radius: 4px; min-height: 24px; }
 """
@@ -49,6 +53,87 @@ class WorkerSignals(QObject):
     log = Signal(str)
     complete = Signal(dict)
     failed = Signal(str)
+
+
+class ArchiveSourcePicker(QDialog):
+    """Search the installed named-archive catalog and return one archive ID."""
+
+    catalog_loaded = Signal(object, str)
+
+    def __init__(self, game_data_folder, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Choose ID Swap Source Archive")
+        self.setModal(True)
+        self.resize(720, 500)
+        self.selected_archive_id = None
+        self._installed_ids = installed_archive_ids(game_data_folder)
+        self._entries = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(9)
+        layout.addWidget(QLabel("FOUND ARCHIVES", objectName="eyebrow"))
+        layout.addWidget(QLabel(
+            "Search an installed armor or helmet archive by name, then click it to add its ID.",
+            objectName="muted",
+        ))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search archive name or ID…")
+        self.search.setEnabled(False)
+        self.search.textChanged.connect(self.refresh_entries)
+        layout.addWidget(self.search)
+        self.results = QListWidget()
+        self.results.itemClicked.connect(self.choose_archive)
+        layout.addWidget(self.results, 1)
+        self.status = QLabel("Loading archive catalog…", objectName="muted")
+        layout.addWidget(self.status)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        close_button = QPushButton("Cancel")
+        close_button.clicked.connect(self.reject)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+
+        self.catalog_loaded.connect(self.set_catalog)
+        threading.Thread(target=self.load_catalog, daemon=True).start()
+
+    def load_catalog(self):
+        catalog = load_archive_catalog()
+        entries = [
+            (archive_id, display_name)
+            for archive_id, display_name in catalog.items()
+            if archive_id in self._installed_ids
+        ]
+        entries.sort(key=lambda item: item[1].casefold())
+        if entries:
+            message = f"{len(entries)} named archives installed. Click one to add it."
+        elif self._installed_ids:
+            message = "No named archives were available. Check your internet connection and try again."
+        else:
+            message = "No game archives were found in the selected Data folder."
+        self.catalog_loaded.emit(entries, message)
+
+    def set_catalog(self, entries, message):
+        self._entries = entries
+        self.search.setEnabled(bool(entries))
+        self.status.setText(message)
+        self.refresh_entries()
+
+    def refresh_entries(self):
+        query = self.search.text().strip().casefold()
+        self.results.clear()
+        for archive_id, display_name in self._entries:
+            if query and query not in display_name.casefold() and query not in archive_id:
+                continue
+            item = QListWidgetItem(f"{display_name}\n{archive_id}")
+            item.setData(Qt.UserRole, archive_id)
+            self.results.addItem(item)
+        if self.results.count() == 0 and self._entries:
+            self.status.setText("No installed archive matches this search.")
+
+    def choose_archive(self, item):
+        self.selected_archive_id = item.data(Qt.UserRole)
+        self.accept()
 
 
 class PatchFixerWindow(QMainWindow):
@@ -154,7 +239,15 @@ class PatchFixerWindow(QMainWindow):
         field = QLineEdit()
         field.setPlaceholderText(placeholder)
         field.returnPressed.connect(self.add_idswap_source_tokens)
-        layout.addWidget(field)
+        input_row = QHBoxLayout()
+        input_row.setSpacing(6)
+        input_row.addWidget(field, 1)
+        picker_button = QPushButton("+")
+        picker_button.setFixedWidth(34)
+        picker_button.setToolTip("Find an installed source archive by name")
+        picker_button.clicked.connect(self.open_idswap_source_picker)
+        input_row.addWidget(picker_button)
+        layout.addLayout(input_row)
 
         self.idswap_token_host = QWidget()
         self.idswap_token_layout = QHBoxLayout(self.idswap_token_host)
@@ -183,11 +276,28 @@ class PatchFixerWindow(QMainWindow):
         if not raw_value:
             return
         for raw_token in raw_value.split(","):
-            token = self.normalize_idswap_source_token(raw_token)
-            if token and token not in self.idswap_source_archive_ids:
-                self.idswap_source_archive_ids.append(token)
+            self.add_idswap_source_token(raw_token)
         self.idswap_source_archive.clear()
         self.refresh_idswap_source_tokens()
+
+    def add_idswap_source_token(self, value):
+        token = self.normalize_idswap_source_token(value)
+        if token and token not in self.idswap_source_archive_ids:
+            self.idswap_source_archive_ids.append(token)
+
+    def open_idswap_source_picker(self):
+        game_data_folder = self.game_path.text().strip()
+        if not Path(game_data_folder).is_dir():
+            QMessageBox.warning(
+                self,
+                "Game Data folder required",
+                "Choose a valid Helldivers 2 Data folder before searching found archives.",
+            )
+            return
+        dialog = ArchiveSourcePicker(game_data_folder, self)
+        if dialog.exec() == QDialog.Accepted and dialog.selected_archive_id:
+            self.add_idswap_source_token(dialog.selected_archive_id)
+            self.refresh_idswap_source_tokens()
 
     def remove_idswap_source_token(self, token):
         self.idswap_source_archive_ids.remove(token)

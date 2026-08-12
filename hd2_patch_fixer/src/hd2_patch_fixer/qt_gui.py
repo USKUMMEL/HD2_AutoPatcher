@@ -79,7 +79,6 @@ class ArchiveSourcePicker(QDialog):
         ))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search archive name or ID…")
-        self.search.setEnabled(False)
         self.search.textChanged.connect(self.refresh_entries)
         layout.addWidget(self.search)
         self.results = QListWidget()
@@ -115,7 +114,6 @@ class ArchiveSourcePicker(QDialog):
 
     def set_catalog(self, entries, message):
         self._entries = entries
-        self.search.setEnabled(bool(entries))
         self.status.setText(message)
         self.refresh_entries()
 

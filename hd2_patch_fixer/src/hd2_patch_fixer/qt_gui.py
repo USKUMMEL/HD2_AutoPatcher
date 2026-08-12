@@ -7,12 +7,12 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Qt
+from PySide6.QtCore import QObject, Signal, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .archive import create_fixed_mod_archive, create_fixed_patch, normalize_archive_selection
@@ -31,6 +31,9 @@ QLineEdit:focus { border: 2px solid #86AFC0; }
 QPushButton { background: #292E33; border: 1px solid #3B4449; border-radius: 5px; padding: 8px 12px; color: #E4E9E5; font-weight: 500; }
 QPushButton:hover { background: #31383D; } QPushButton:checked { background: #31383D; border-color: #7EAC90; } QPushButton#accent { background: #7EAC90; color: #102018; border-color: #9AC2A7; font-weight: 600; }
 QPushButton#accent:hover { background: #9AC2A7; } QPushButton:disabled { color: #66706A; background: #202428; }
+QFrame#archiveToken { background: #292E33; border: 1px solid #526058; border-radius: 4px; }
+QPushButton#tokenRemove { min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px; padding: 0; border: 0; background: transparent; color: #B8C2BC; font-size: 15px; }
+QPushButton#tokenRemove:hover { color: #FFFFFF; background: #4A3434; }
 QCheckBox { spacing: 7px; color: #E4E9E5; background: transparent; } QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #526058; border-radius: 3px; background: #171A1D; }
 QCheckBox::indicator:checked { background: #7EAC90; border-color: #9AC2A7; } QScrollArea { border: 0; } QScrollBar:vertical { width: 10px; background: #202428; } QScrollBar::handle:vertical { background: #3B4449; border-radius: 4px; min-height: 24px; }
 """
@@ -61,6 +64,7 @@ class PatchFixerWindow(QMainWindow):
         self.signals.complete.connect(self.finish)
         self.signals.failed.connect(self.fail)
         self.type_checks = {}
+        self.idswap_source_archive_ids = []
         self.build_ui()
 
     def build_ui(self):
@@ -89,11 +93,11 @@ class PatchFixerWindow(QMainWindow):
         body.addWidget(main_scroll, 1)
         main_layout.addWidget(QLabel("PATCH MIGRATION", objectName="eyebrow")); main_layout.addWidget(QLabel("Rebuild compatible mod patches", objectName="title")); main_layout.addWidget(QLabel("Preserve mod content while updating package structure for the installed Helldivers 2 build.", objectName="muted"))
         self.game_path = self.path_field(main_layout, "GAME DATA FOLDER", self.browse_game)
-        self.idswap_source_archive = self.text_field(
+        self.idswap_source_archive = self.idswap_source_field(
             main_layout,
             "ID SWAP SOURCE ARCHIVE(S) — OPTIONAL",
-            "Example: 0A1B2C3D, 11223344",
-            "Advanced fallback only when automatic Unit migration cannot verify a source. Armor and helmet target LODs are found automatically; enter base archive ID(s), separated by commas, only if needed.",
+            "Enter an archive ID, then press Enter",
+            "Advanced fallback only when automatic Unit migration cannot verify a source. Add one or more base archive IDs as removable tokens.",
         )
         self.stack = QStackedWidget()
         self.stack.addWidget(self.single_page())
@@ -102,6 +106,9 @@ class PatchFixerWindow(QMainWindow):
         main_layout.addWidget(self.options_card())
         lower = QHBoxLayout(); lower.setSpacing(12); lower.addWidget(self.log_card(), 1); actions = QVBoxLayout(); self.run_button = QPushButton("Run Migration", objectName="accent"); self.run_button.clicked.connect(self.run_fix); actions.addWidget(self.run_button); actions.addWidget(self.parallel_patches_card()); actions.addStretch(); lower.addLayout(actions); main_layout.addLayout(lower, 1)
         self.set_mode(0)
+        # The first layout pass can report an expanded page hint before Qt has
+        # calculated the Browse rows. Refresh it once the window is shown.
+        QTimer.singleShot(0, self.refresh_input_stack_height)
 
     def nav_button(self, text, checked=False):
         button = QPushButton(text); button.setCheckable(True); button.setChecked(checked); return button
@@ -110,7 +117,11 @@ class PatchFixerWindow(QMainWindow):
         card = QFrame(objectName="card"); card.setContentsMargins(0, 0, 0, 0); return card
 
     def path_field(self, parent_layout, label, browse):
-        card = self.card(); layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.setSpacing(7); layout.addWidget(QLabel(label, objectName="eyebrow")); row = QHBoxLayout(); field = QLineEdit(); field.setPlaceholderText("Choose a folder or file…"); browse_button = QPushButton("Browse"); browse_button.clicked.connect(browse); row.addWidget(field, 1); row.addWidget(browse_button); layout.addLayout(row); parent_layout.addWidget(card); return field
+        card = self.card()
+        # Browse cards always follow their content height. This prevents the
+        # two input/output cards expanding vertically on the first show.
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.setSpacing(7); layout.addWidget(QLabel(label, objectName="eyebrow")); row = QHBoxLayout(); field = QLineEdit(); field.setPlaceholderText("Choose a folder or file…"); browse_button = QPushButton("Browse"); browse_button.clicked.connect(browse); row.addWidget(field, 1); row.addWidget(browse_button); layout.addLayout(row); parent_layout.addWidget(card); return field
 
     def text_field(self, parent_layout, label, placeholder, hint=None):
         card = self.card()
@@ -126,11 +137,85 @@ class PatchFixerWindow(QMainWindow):
         parent_layout.addWidget(card)
         return field
 
+    def idswap_source_field(self, parent_layout, label, placeholder, hint=None):
+        """Build a token editor for optional ID-swap source archives."""
+        card = self.card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(7)
+        layout.addWidget(QLabel(label, objectName="eyebrow"))
+        field = QLineEdit()
+        field.setPlaceholderText(placeholder)
+        field.returnPressed.connect(self.add_idswap_source_tokens)
+        layout.addWidget(field)
+
+        self.idswap_token_host = QWidget()
+        self.idswap_token_layout = QHBoxLayout(self.idswap_token_host)
+        self.idswap_token_layout.setContentsMargins(0, 0, 0, 0)
+        self.idswap_token_layout.setSpacing(6)
+        self.idswap_token_layout.addStretch()
+        self.idswap_token_host.setVisible(False)
+        layout.addWidget(self.idswap_token_host)
+        if hint:
+            layout.addWidget(QLabel(hint, objectName="muted"))
+        parent_layout.addWidget(card)
+        return field
+
+    @staticmethod
+    def normalize_idswap_source_token(value):
+        value = value.strip()
+        hex_value = value[2:] if value.lower().startswith("0x") else value
+        if hex_value and all(char in "0123456789abcdefABCDEF" for char in hex_value):
+            return hex_value.lower()
+        return value
+
+    def add_idswap_source_tokens(self):
+        raw_value = self.idswap_source_archive.text().strip()
+        if not raw_value:
+            return
+        for raw_token in raw_value.split(","):
+            token = self.normalize_idswap_source_token(raw_token)
+            if token and token not in self.idswap_source_archive_ids:
+                self.idswap_source_archive_ids.append(token)
+        self.idswap_source_archive.clear()
+        self.refresh_idswap_source_tokens()
+
+    def remove_idswap_source_token(self, token):
+        self.idswap_source_archive_ids.remove(token)
+        self.refresh_idswap_source_tokens()
+
+    def refresh_idswap_source_tokens(self):
+        while self.idswap_token_layout.count() > 1:
+            item = self.idswap_token_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for token in self.idswap_source_archive_ids:
+            chip = QFrame(objectName="archiveToken")
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(8, 3, 4, 3)
+            chip_layout.setSpacing(5)
+            chip_layout.addWidget(QLabel(token))
+            remove = QPushButton("×", objectName="tokenRemove")
+            remove.setToolTip(f"Remove {token}")
+            remove.clicked.connect(
+                lambda _checked=False, value=token: self.remove_idswap_source_token(value)
+            )
+            chip_layout.addWidget(remove)
+            self.idswap_token_layout.insertWidget(self.idswap_token_layout.count() - 1, chip)
+        self.idswap_token_host.setVisible(bool(self.idswap_source_archive_ids))
+
+    def idswap_source_archive_value(self):
+        # Include text still being typed when Run is pressed, so a missing
+        # final Enter never silently discards an archive ID.
+        self.add_idswap_source_tokens()
+        return ",".join(self.idswap_source_archive_ids) or None
+
     def single_page(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.patch_path = self.path_field(layout, "BROKEN PATCH FILE", self.browse_patch); self.export_path = self.path_field(layout, "EXPORT FOLDER", self.browse_export); layout.addStretch(1); return page
+        page = QWidget(); page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.patch_path = self.path_field(layout, "BROKEN PATCH FILE", self.browse_patch); self.export_path = self.path_field(layout, "EXPORT FOLDER", self.browse_export); layout.setAlignment(Qt.AlignTop); return page
 
     def archive_page(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.mod_path = self.path_field(layout, "COMPRESSED MOD FILE", self.browse_mod); self.zip_path = self.path_field(layout, "EXPORT ZIP FILE", self.browse_zip); layout.addStretch(1); return page
+        page = QWidget(); page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.mod_path = self.path_field(layout, "COMPRESSED MOD FILE", self.browse_mod); self.zip_path = self.path_field(layout, "EXPORT ZIP FILE", self.browse_zip); layout.setAlignment(Qt.AlignTop); return page
 
     def options_card(self):
         card = self.card()
@@ -214,8 +299,7 @@ class PatchFixerWindow(QMainWindow):
 
     def set_mode(self, mode):
         self.stack.setCurrentIndex(mode)
-        # Keep the current input page compact instead of reserving unused space.
-        self.stack.setFixedHeight(self.stack.currentWidget().sizeHint().height())
+        self.refresh_input_stack_height()
         self.single_nav.setChecked(mode == 0)
         self.archive_nav.setChecked(mode == 1)
         self.run_button.setEnabled(True)
@@ -230,6 +314,13 @@ class PatchFixerWindow(QMainWindow):
                 if parallel_available
                 else "Single Patch processes one patch file at a time."
             )
+
+    def refresh_input_stack_height(self):
+        current_page = self.stack.currentWidget()
+        if current_page is None:
+            return
+        current_page.layout().activate()
+        self.stack.setFixedHeight(current_page.layout().sizeHint().height())
 
     def change_parallel_patch_count(self, delta):
         self.parallel_patch_count = max(
@@ -279,7 +370,7 @@ class PatchFixerWindow(QMainWindow):
         raw_fallback = self.raw_fallback.isChecked()
         migrate_audio = self.audio_migration.isChecked()
         weapon_swap_mode = self.weapon_swap_mode.isChecked()
-        idswap_source_archive = self.idswap_source_archive.text().strip() or None
+        idswap_source_archive = self.idswap_source_archive_value()
         self.run_button.setEnabled(False); self.status.setText("MIGRATING"); self.append_log("Starting patch migration…")
         def worker():
             try:

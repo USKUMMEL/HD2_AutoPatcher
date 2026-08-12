@@ -2590,6 +2590,7 @@ def create_fixed_patch(
 
     idswap_source_archives = []
     idswap_source_matches = {}
+    legacy_armor_source_matches = {}
     if idswap_source_archive:
         idswap_source_paths = resolve_archive_input_paths(game_data_folder, idswap_source_archive)
         if not idswap_source_paths:
@@ -2657,13 +2658,14 @@ def create_fixed_patch(
         mapping.target_unit_id: mapping for mapping in weapon_mappings
     }
 
-    # Keep a supplied archive as a per-Unit advanced fallback.  It must not
-    # disable automatic migration for other Units in a mixed weapon/armor mod.
-    # Do not use it to guess zero-reference armor/helmet Units.
+    # Preserve the old patch-tool behavior for static armor/helmet only when
+    # the user explicitly supplies its source archive.  This is intentionally
+    # separate from automatic weapon inference: it uses the legacy source
+    # matcher and the old source-LOD repair path.
     if idswap_source_archives:
         for unit_entry in broken_patch.toc_dict.get(UnitID, {}).values():
             target_id = int(unit_entry.file_id)
-            if target_id in weapon_mapping_by_target or is_static_unit(unit_entry):
+            if target_id in weapon_mapping_by_target:
                 continue
             match = match_unit_to_source_archives(
                 unit_entry,
@@ -2675,6 +2677,18 @@ def create_fixed_patch(
             matched_entry = match["entry"]
             matched_similarity = match["similarity"]
             matched_source_name = match["name"]
+            if is_static_unit(unit_entry):
+                legacy_armor_source_matches[target_id] = {
+                    "entry": matched_entry,
+                    "name": matched_source_name,
+                }
+                log_message(
+                    log,
+                    f"LEGACY ARMOR IDSWAP source for Unit {unit_entry.file_id}: "
+                    f"{matched_entry.file_id} from {matched_source_name} "
+                    f"(score {matched_similarity.score}; {', '.join(matched_similarity.reasons)})",
+                )
+                continue
             if matched_similarity.score < IDSWAP_SOURCE_MATCH_MIN_SCORE:
                 log_message(
                     log,
@@ -2737,6 +2751,14 @@ def create_fixed_patch(
                 source_mapping = weapon_mapping_by_target[int(entry.file_id)]
                 new_entry = migrate_weapon_idswap_unit(entry, source_mapping.source_entry)
                 mode = "rigged-unit-idswap-surgical"
+            elif entry.type_id == UnitID and int(entry.file_id) in legacy_armor_source_matches:
+                legacy_source = legacy_armor_source_matches[int(entry.file_id)]
+                new_entry, mode = rebuild_idswap_unit_from_source_archive(
+                    entry,
+                    legacy_source["entry"],
+                    legacy_source["name"],
+                    log=log,
+                )
             elif entry.type_id == UnitID and int(entry.file_id) in idswap_source_matches:
                 # Manual source selection is now surgical too.  Rebuilding a
                 # source Unit can overwrite custom armor/weapon transforms,

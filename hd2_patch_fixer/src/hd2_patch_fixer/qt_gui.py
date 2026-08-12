@@ -394,7 +394,7 @@ class PatchFixerWindow(QMainWindow):
         layout.addWidget(self.raw_fallback)
         layout.addWidget(self.weapon_swap_mode)
         layout.addWidget(QLabel(
-            "Only verified rigged weapon swaps use this mode. Armor and helmet patches keep the original patch-tool repair path.",
+            "Option for weapon id swap patching, Only verified rigged weapon swaps use this mode",
             objectName="muted",
         ))
         return card

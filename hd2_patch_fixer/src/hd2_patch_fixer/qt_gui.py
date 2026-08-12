@@ -92,7 +92,7 @@ class PatchFixerWindow(QMainWindow):
             main_layout,
             "ID SWAP SOURCE ARCHIVE(S) — OPTIONAL",
             "Example: 0A1B2C3D, 11223344",
-            "Advanced fallback for manual/armor Unit swaps. Weapon swaps are detected automatically; enter base archive ID(s), separated by commas, only if needed.",
+            "Advanced fallback only when automatic Unit migration cannot verify a source. Armor and helmet target LODs are found automatically; enter base archive ID(s), separated by commas, only if needed.",
         )
         self.stack = QStackedWidget()
         self.stack.addWidget(self.single_page())
@@ -160,13 +160,13 @@ class PatchFixerWindow(QMainWindow):
         layout.addLayout(grid)
         self.raw_fallback = QCheckBox("Preserve unknown or unsupported payloads when rebuilding")
         self.raw_fallback.setChecked(True)
-        self.weapon_swap_mode = QCheckBox("Safe automatic Weapon ID Swap detection and migration")
+        self.weapon_swap_mode = QCheckBox("Safe automatic Unit ID Swap migration")
         self.weapon_swap_mode.setChecked(True)
         self.audio_migration = QCheckBox("Aggressive Audio migration — merge Wwise Banks into current game archives")
         layout.addWidget(self.raw_fallback)
         layout.addWidget(self.weapon_swap_mode)
         layout.addWidget(QLabel(
-            "Detects strong source references automatically and preserves patch animation, bone, and GPU data.",
+            "Rigged weapon swaps preserve patch animation, bone, LOD, and GPU data. Static armor/helmet swaps refresh only the current target LOD and Unit schema.",
             objectName="muted",
         ))
         layout.addWidget(self.audio_migration)

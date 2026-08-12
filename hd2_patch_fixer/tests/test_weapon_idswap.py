@@ -11,6 +11,8 @@ from hd2_patch_fixer.archive import (  # noqa: E402
     StreamToc,
     TocEntry,
     infer_weapon_idswap_mappings,
+    is_static_unit,
+    migrate_static_unit_idswap_unit,
     migrate_weapon_idswap_unit,
 )
 from hd2_patch_fixer.constants import UnitID  # noqa: E402
@@ -98,6 +100,55 @@ def _unit_entry(
     )
     entry.gpu_data = b"custom-gpu-payload"
     entry.stream_data = b"custom-stream-payload"
+    return entry
+
+
+def _build_static_unit_payload(
+    *,
+    version: int,
+    lod_data: bytes,
+    transform_marker: bytes,
+    format_ids: tuple[int, ...] = (0x1A, 0x10, 0x1D),
+) -> bytes:
+    """Build a zero-reference Unit whose LOD size can change independently."""
+    lod_start = 0x80
+    transform_start = lod_start + len(lod_data)
+    stream_start = transform_start + len(transform_marker)
+    layout_record_start = stream_start + 16
+    ending = layout_record_start + 16 * 20 + 24
+    payload = bytearray(ending + 8)
+
+    struct.pack_into("<Q", payload, 0x28, (version << 32) | 2)
+    struct.pack_into("<I", payload, 0x30, lod_start)
+    struct.pack_into("<I", payload, 0x34, transform_start)
+    struct.pack_into("<I", payload, 0x5C, stream_start)
+    struct.pack_into("<I", payload, 0x60, ending)
+    payload[lod_start:transform_start] = lod_data
+    payload[transform_start:stream_start] = transform_marker
+
+    struct.pack_into("<I", payload, stream_start, 1)
+    struct.pack_into("<I", payload, stream_start + 4, 8)
+    for index in range(16):
+        item_offset = layout_record_start + index * 20
+        struct.pack_into("<I", payload, item_offset, 0x70000000 + index)
+        format_id = format_ids[index] if index < len(format_ids) else 0
+        struct.pack_into("<I", payload, item_offset + 4, format_id)
+        payload[item_offset + 8:item_offset + 20] = bytes([0xC0 + index]) * 12
+    payload[layout_record_start + 16 * 20:ending] = b"custom-static-tail-data"[: ending - (layout_record_start + 16 * 20)]
+    return bytes(payload)
+
+
+def _static_unit_entry(file_id: int, *, version: int, lod_data: bytes, transform_marker: bytes):
+    entry = TocEntry()
+    entry.file_id = file_id
+    entry.type_id = UnitID
+    entry.toc_data = _build_static_unit_payload(
+        version=version,
+        lod_data=lod_data,
+        transform_marker=transform_marker,
+    )
+    entry.gpu_data = b"custom-static-gpu"
+    entry.stream_data = b"custom-static-stream"
     return entry
 
 
@@ -248,6 +299,45 @@ class WeaponIdSwapTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "schema update is unknown"):
             migrate_weapon_idswap_unit(target, source)
+
+    def test_static_armor_or_helmet_migration_uses_current_target_lod_only(self):
+        target_id = 0xABCD
+        patch = _static_unit_entry(
+            target_id,
+            version=LEGACY_UNIT_VERSION,
+            lod_data=b"PATCH-LOD-KEEP-NO-BYTES",
+            transform_marker=b"PATCH-CUSTOM-TRANSFORM",
+        )
+        current_target = _static_unit_entry(
+            target_id,
+            version=CURRENT_UNIT_VERSION,
+            lod_data=b"CURRENT-TARGET-LOD-IS-LONGER",
+            transform_marker=b"CURRENT-TRANSFORM-MUST-NOT-BE-COPIED",
+        )
+        original = bytes(patch.toc_data)
+
+        migrated = migrate_static_unit_idswap_unit(patch, current_target)
+
+        self.assertTrue(is_static_unit(patch))
+        self.assertEqual(migrated.file_id, target_id)
+        self.assertEqual(_u32(migrated.toc_data, 0x2C), CURRENT_UNIT_VERSION)
+        self.assertIn(b"CURRENT-TARGET-LOD-IS-LONGER", migrated.toc_data)
+        self.assertNotIn(b"PATCH-LOD-KEEP-NO-BYTES", migrated.toc_data)
+        self.assertIn(b"PATCH-CUSTOM-TRANSFORM", migrated.toc_data)
+        self.assertNotIn(b"CURRENT-TRANSFORM-MUST-NOT-BE-COPIED", migrated.toc_data)
+        self.assertEqual(migrated.gpu_data, patch.gpu_data)
+        self.assertEqual(migrated.stream_data, patch.stream_data)
+
+        # The LOD grew, so offsets after it move by exactly the same amount.
+        size_delta = len(b"CURRENT-TARGET-LOD-IS-LONGER") - len(b"PATCH-LOD-KEEP-NO-BYTES")
+        self.assertEqual(_u32(migrated.toc_data, 0x34), _u32(original, 0x34) + size_delta)
+        self.assertEqual(_u32(migrated.toc_data, 0x5C), _u32(original, 0x5C) + size_delta)
+        self.assertEqual(_u32(migrated.toc_data, 0x60), _u32(original, 0x60) + size_delta)
+
+        # Legacy vertex-format IDs move by +4, but no other patch sections
+        # are reconstructed or sourced from the target Unit.
+        first_component_format = _u32(migrated.toc_data, _u32(migrated.toc_data, 0x5C) + 16 + 4)
+        self.assertEqual(first_component_format, 0x1E)
 
 
 if __name__ == "__main__":

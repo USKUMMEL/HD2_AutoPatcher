@@ -1,4 +1,5 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import shutil
 import struct
@@ -2462,6 +2463,7 @@ def create_fixed_patch(
     output_patch_path: str | None = None,
     idswap_source_archive: str | None = None,
     log=None,
+    slim_initialized: bool = False,
 ):
     broken_patch_path = normalize_archive_selection(broken_patch_path)
     if not Path(game_data_folder).is_dir():
@@ -2471,7 +2473,11 @@ def create_fixed_patch(
     if not Path(export_dir).is_dir():
         raise ValueError("Export folder is invalid.")
 
-    slim_init(game_data_folder)
+    # A compressed mod can process independent patch files in parallel.  Its
+    # parent initializes the Slim bundle map once before creating workers;
+    # rebuilding that global read-only map inside every worker is wasteful.
+    if not slim_initialized:
+        slim_init(game_data_folder)
     archive_index = (
         GameArchiveIndex(game_data_folder)
         if auto_include_unit_dependencies or migrate_audio or weapon_swap_mode
@@ -2826,6 +2832,7 @@ def create_fixed_mod_archive(
     weapon_swap_mode: bool = True,
     idswap_source_archive: str | None = None,
     log=None,
+    max_workers: int = 1,
 ):
     if not Path(game_data_folder).is_dir():
         raise ValueError("Game data folder is invalid.")
@@ -2833,6 +2840,12 @@ def create_fixed_mod_archive(
         raise ValueError("Compressed mod file does not exist.")
     if Path(output_zip_path).suffix.lower() != ".zip":
         raise ValueError("Export file must be a .zip file.")
+    if not isinstance(max_workers, int) or max_workers < 1:
+        raise ValueError("Parallel patch count must be a positive integer.")
+
+    # Slim package metadata is global in the community reader.  Build it once
+    # before worker threads begin; all patch workers only read it afterwards.
+    slim_init(game_data_folder)
 
     with tempfile.TemporaryDirectory(prefix="hd2_patch_fixer_") as temp_dir:
         extract_dir = str(Path(temp_dir) / "mod")
@@ -2851,7 +2864,11 @@ def create_fixed_mod_archive(
         fixed_patch_results = []
         log_message(log, f"Found {len(patch_paths)} patch file(s) inside compressed mod archive.")
 
-        for patch_path in patch_paths:
+        worker_count = min(max_workers, len(patch_paths))
+        if worker_count > 1:
+            log_message(log, f"Processing up to {worker_count} patch files in parallel.")
+
+        def fix_one_patch(patch_path):
             relative_path = Path(patch_path).relative_to(extract_dir)
             log_message(log, f"Fixing patch inside archive: {relative_path}")
             result = create_fixed_patch(
@@ -2867,15 +2884,25 @@ def create_fixed_mod_archive(
                 output_patch_path=patch_path,
                 idswap_source_archive=idswap_source_archive,
                 log=log,
+                slim_initialized=True,
             )
-            fixed_patch_results.append(
-                {
-                    "relative_path": str(relative_path).replace("\\", "/"),
-                    "output_path": result["output_path"],
-                    "kept_entries": result["kept_entries"],
-                    "skipped_entries": result["skipped_entries"],
-                }
-            )
+            return {
+                "relative_path": str(relative_path).replace("\\", "/"),
+                "output_path": result["output_path"],
+                "kept_entries": result["kept_entries"],
+                "skipped_entries": result["skipped_entries"],
+            }
+
+        if worker_count == 1:
+            for patch_path in patch_paths:
+                fixed_patch_results.append(fix_one_patch(patch_path))
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [executor.submit(fix_one_patch, patch_path) for patch_path in patch_paths]
+                for future in as_completed(futures):
+                    fixed_patch_results.append(future.result())
+
+        fixed_patch_results.sort(key=lambda result: result["relative_path"])
 
         log_message(log, f"Creating fixed compressed mod zip: {output_zip_path}")
         create_zip_from_directory(extract_dir, output_zip_path)

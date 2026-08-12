@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout,
@@ -99,7 +100,7 @@ class PatchFixerWindow(QMainWindow):
         self.stack.addWidget(self.archive_page())
         main_layout.addWidget(self.stack)
         main_layout.addWidget(self.options_card())
-        lower = QHBoxLayout(); lower.setSpacing(12); lower.addWidget(self.log_card(), 1); actions = QVBoxLayout(); self.run_button = QPushButton("Run Migration", objectName="accent"); self.run_button.clicked.connect(self.run_fix); actions.addWidget(self.run_button); actions.addWidget(QLabel("Audio semantic merge is off by default.\nEnable it only for trusted audio mod baselines.", objectName="muted")); actions.addStretch(); lower.addLayout(actions); main_layout.addLayout(lower, 1)
+        lower = QHBoxLayout(); lower.setSpacing(12); lower.addWidget(self.log_card(), 1); actions = QVBoxLayout(); self.run_button = QPushButton("Run Migration", objectName="accent"); self.run_button.clicked.connect(self.run_fix); actions.addWidget(self.run_button); actions.addWidget(self.parallel_patches_card()); actions.addStretch(); lower.addLayout(actions); main_layout.addLayout(lower, 1)
         self.set_mode(0)
 
     def nav_button(self, text, checked=False):
@@ -179,6 +180,38 @@ class PatchFixerWindow(QMainWindow):
     def log_card(self):
         card = self.card(); layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.addWidget(QLabel("MIGRATION LOG", objectName="eyebrow")); self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setPlainText("Ready. Choose a game folder and mod patch."); layout.addWidget(self.log); return card
 
+    def parallel_patches_card(self):
+        """Small, explicit concurrency control for multi-patch mod archives."""
+        card = self.card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("PARALLEL PATCHES", objectName="eyebrow"))
+        row = QHBoxLayout()
+        self.parallel_minus = QPushButton("−")
+        self.parallel_minus.setFixedWidth(34)
+        self.parallel_value = QLabel("1")
+        self.parallel_value.setAlignment(Qt.AlignCenter)
+        self.parallel_value.setFixedWidth(32)
+        self.parallel_plus = QPushButton("+")
+        self.parallel_plus.setFixedWidth(34)
+        self.parallel_limit = max(1, min(8, os.cpu_count() or 4))
+        self.parallel_patch_count = 1
+        self.parallel_minus.clicked.connect(lambda: self.change_parallel_patch_count(-1))
+        self.parallel_plus.clicked.connect(lambda: self.change_parallel_patch_count(1))
+        row.addWidget(self.parallel_minus)
+        row.addWidget(self.parallel_value)
+        row.addWidget(self.parallel_plus)
+        row.addStretch()
+        layout.addLayout(row)
+        self.parallel_hint = QLabel(
+            f"Compressed Mods only · 1–{self.parallel_limit}. More jobs use more CPU, disk, and RAM.",
+            objectName="muted",
+        )
+        self.parallel_hint.setWordWrap(True)
+        layout.addWidget(self.parallel_hint)
+        return card
+
     def set_mode(self, mode):
         self.stack.setCurrentIndex(mode)
         # Keep the current input page compact instead of reserving unused space.
@@ -187,6 +220,24 @@ class PatchFixerWindow(QMainWindow):
         self.archive_nav.setChecked(mode == 1)
         self.run_button.setEnabled(True)
         self.status.setText("READY")
+        if hasattr(self, "parallel_minus"):
+            parallel_available = mode == 1
+            self.parallel_minus.setEnabled(parallel_available and self.parallel_patch_count > 1)
+            self.parallel_plus.setEnabled(parallel_available and self.parallel_patch_count < self.parallel_limit)
+            self.parallel_value.setEnabled(parallel_available)
+            self.parallel_hint.setText(
+                f"Compressed Mods only · 1–{self.parallel_limit}. More jobs use more CPU, disk, and RAM."
+                if parallel_available
+                else "Single Patch processes one patch file at a time."
+            )
+
+    def change_parallel_patch_count(self, delta):
+        self.parallel_patch_count = max(
+            1,
+            min(self.parallel_limit, self.parallel_patch_count + delta),
+        )
+        self.parallel_value.setText(str(self.parallel_patch_count))
+        self.set_mode(self.stack.currentIndex())
 
     def set_all_types(self, checked):
         for check in self.type_checks.values(): check.setChecked(checked)
@@ -233,6 +284,8 @@ class PatchFixerWindow(QMainWindow):
         def worker():
             try:
                 args = dict(game_data_folder=game, keep_type_ids=keep, keep_unknown_types=keep_unknown, raw_fallback_for_unsupported=raw_fallback, migrate_audio=migrate_audio, weapon_swap_mode=weapon_swap_mode, idswap_source_archive=idswap_source_archive, log=lambda text: self.signals.log.emit(text))
+                if archive_mode:
+                    args["max_workers"] = self.parallel_patch_count
                 result = create_fixed_mod_archive(input_archive_path=source, output_zip_path=target, **args) if archive_mode else create_fixed_patch(broken_patch_path=source, export_dir=target, **args)
                 result["archive_mode"] = archive_mode; self.signals.complete.emit(result)
             except Exception as exc: self.signals.failed.emit(str(exc))

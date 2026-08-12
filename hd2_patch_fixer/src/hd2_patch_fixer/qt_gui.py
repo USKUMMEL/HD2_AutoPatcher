@@ -60,6 +60,7 @@ class ArchiveSourcePicker(QDialog):
     """Search the installed named-archive catalog and return one archive ID."""
 
     catalog_loaded = Signal(object, str)
+    archive_selected = Signal(str, str)
 
     def __init__(self, game_data_folder, parent=None):
         super().__init__(parent)
@@ -126,13 +127,16 @@ class ArchiveSourcePicker(QDialog):
                 continue
             item = QListWidgetItem(f"{display_name}\n{archive_id}")
             item.setData(Qt.UserRole, archive_id)
+            item.setData(Qt.UserRole + 1, display_name)
             self.results.addItem(item)
         if self.results.count() == 0 and self._entries:
             self.status.setText("No installed archive matches this search.")
 
     def choose_archive(self, item):
         self.selected_archive_id = item.data(Qt.UserRole)
-        self.accept()
+        display_name = item.data(Qt.UserRole + 1)
+        self.archive_selected.emit(self.selected_archive_id, display_name)
+        self.status.setText(f"Added: {display_name}. Click another archive or close this window.")
 
 
 class PatchFixerWindow(QMainWindow):
@@ -149,6 +153,7 @@ class PatchFixerWindow(QMainWindow):
         self.signals.failed.connect(self.fail)
         self.type_checks = {}
         self.idswap_source_archive_ids = []
+        self.idswap_source_archive_labels = {}
         self.preferences = load_preferences()
         self.build_ui()
         self.restore_preferences()
@@ -290,10 +295,12 @@ class PatchFixerWindow(QMainWindow):
         self.idswap_source_archive.clear()
         self.refresh_idswap_source_tokens()
 
-    def add_idswap_source_token(self, value):
+    def add_idswap_source_token(self, value, display_name=None):
         token = self.normalize_idswap_source_token(value)
         if token and token not in self.idswap_source_archive_ids:
             self.idswap_source_archive_ids.append(token)
+        if token and display_name:
+            self.idswap_source_archive_labels[token] = display_name
 
     def open_idswap_source_picker(self):
         game_data_folder = self.game_path.text().strip()
@@ -305,12 +312,16 @@ class PatchFixerWindow(QMainWindow):
             )
             return
         dialog = ArchiveSourcePicker(game_data_folder, self)
-        if dialog.exec() == QDialog.Accepted and dialog.selected_archive_id:
-            self.add_idswap_source_token(dialog.selected_archive_id)
-            self.refresh_idswap_source_tokens()
+        dialog.archive_selected.connect(self.add_found_idswap_source_archive)
+        dialog.exec()
+
+    def add_found_idswap_source_archive(self, archive_id, display_name):
+        self.add_idswap_source_token(archive_id, display_name)
+        self.refresh_idswap_source_tokens()
 
     def remove_idswap_source_token(self, token):
         self.idswap_source_archive_ids.remove(token)
+        self.idswap_source_archive_labels.pop(token, None)
         self.refresh_idswap_source_tokens()
 
     def refresh_idswap_source_tokens(self):
@@ -324,9 +335,12 @@ class PatchFixerWindow(QMainWindow):
             chip_layout = QHBoxLayout(chip)
             chip_layout.setContentsMargins(8, 3, 4, 3)
             chip_layout.setSpacing(5)
-            chip_layout.addWidget(QLabel(token))
+            display_name = self.idswap_source_archive_labels.get(token, token)
+            label = QLabel(display_name)
+            label.setToolTip(f"{display_name}\nArchive ID: {token}")
+            chip_layout.addWidget(label)
             remove = QPushButton("×", objectName="tokenRemove")
-            remove.setToolTip(f"Remove {token}")
+            remove.setToolTip(f"Remove {display_name}")
             remove.clicked.connect(
                 lambda _checked=False, value=token: self.remove_idswap_source_token(value)
             )

@@ -2235,6 +2235,15 @@ def build_entry_from_source(
             return entry.clone(), "audio-unvalidated-preserve"
         return entry.clone(), "audio-validated-preserve"
 
+    if entry.type_id in {BoneID, StateMachineID}:
+        # Unit migrations do not change Bones or State Machine payloads.  The
+        # parsers for these opaque runtime resources can normalize padding and
+        # offset fields while serializing (Railgun's State Machine changed
+        # from 796 to 804 bytes), which can make a perfectly present model
+        # appear invisible or lose its runtime animation.  Keep authored bytes
+        # exactly as supplied; StreamToc still writes fresh package offsets.
+        return entry.clone(), "raw-preserve"
+
     if entry.type_id in SUPPORTED_REBUILD_TYPES:
         try:
             toc_data, gpu_data, stream_data, mode = rebuild_entry_payload(entry)

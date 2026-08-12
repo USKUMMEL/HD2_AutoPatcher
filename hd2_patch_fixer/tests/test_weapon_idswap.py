@@ -14,9 +14,10 @@ from hd2_patch_fixer.archive import (  # noqa: E402
     is_static_unit,
     migrate_static_unit_idswap_unit,
     migrate_weapon_idswap_unit,
+    build_entry_from_source,
     validate_unit_dependencies,
 )
-from hd2_patch_fixer.constants import UnitID  # noqa: E402
+from hd2_patch_fixer.constants import BoneID, StateMachineID, UnitID  # noqa: E402
 
 
 LEGACY_UNIT_VERSION = 0xA4CD34
@@ -359,6 +360,30 @@ class WeaponIdSwapTests(unittest.TestCase):
         )
 
         self.assertEqual(unresolved, [])
+
+    def test_bones_and_state_machines_are_preserved_byte_for_byte(self):
+        """These runtime payloads must never be parser-rebuilt during a Unit fix."""
+        for type_id, payload in (
+            (BoneID, b"custom-bones\x00\x91\x02"),
+            (StateMachineID, b"custom-state-machine\x00\x9A\x03"),
+        ):
+            entry = TocEntry()
+            entry.file_id = 0x1234
+            entry.type_id = type_id
+            entry.toc_data = payload
+            entry.gpu_data = b"sidecar-gpu"
+            entry.stream_data = b"sidecar-stream"
+
+            migrated, mode = build_entry_from_source(
+                entry,
+                raw_fallback_for_unsupported=True,
+                default_archive=StreamToc(),
+            )
+
+            self.assertEqual(mode, "raw-preserve")
+            self.assertEqual(migrated.toc_data, payload)
+            self.assertEqual(migrated.gpu_data, entry.gpu_data)
+            self.assertEqual(migrated.stream_data, entry.stream_data)
 
 
 if __name__ == "__main__":

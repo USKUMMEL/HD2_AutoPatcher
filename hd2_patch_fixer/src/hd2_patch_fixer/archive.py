@@ -2616,8 +2616,8 @@ def create_fixed_patch(
 
     # Rigged weapon swaps need their source Unit only to obtain the current
     # schema version.  The mod's rig, LOD, mesh, GPU, and stream data stays in
-    # the patch.  Static armor/helmet swaps are handled separately below by
-    # resolving their current *target* Unit by ID.
+    # the patch.  Static armor/helmet Units deliberately stay on the original
+    # patch-tool path: all-zero references are not a reliable swap identity.
     weapon_mappings = []
     if weapon_swap_mode and archive_index is not None:
         mapping_candidates = infer_weapon_idswap_mappings(broken_patch, archive_index)
@@ -2657,51 +2657,13 @@ def create_fixed_patch(
         mapping.target_unit_id: mapping for mapping in weapon_mappings
     }
 
-    # Static armor and helmet Units normally have no Bone/Composite/State
-    # Machine references, so a weapon-style source lookup is impossible.  The
-    # Community Unit Patcher instead resolves the current Unit with the same
-    # target file ID and refreshes only its LOD group.  This needs no manual
-    # archive input and never copies mesh/bone/GPU data from the game.
-    static_target_entries = {}
-    if weapon_swap_mode:
-        for unit_entry in broken_patch.toc_dict.get(UnitID, {}).values():
-            target_id = int(unit_entry.file_id)
-            if target_id in weapon_mapping_by_target or not is_static_unit(unit_entry):
-                continue
-            target_entry, target_name = resolve_unit_source_entry(
-                target_id,
-                default_archive,
-                archive_index=archive_index,
-            )
-            if target_entry is None:
-                log_message(
-                    log,
-                    f"STATIC UNIT target {target_id} is not present in current game data; preserving it without a target LOD refresh.",
-                )
-                continue
-            # Static migration reads only the target Unit TOC bytes.  Retain a
-            # tiny schema-only entry instead of several large base-game GPU
-            # buffers for a multi-piece armor patch.
-            schema_entry = TocEntry()
-            schema_entry.file_id = int(target_entry.file_id)
-            schema_entry.type_id = int(target_entry.type_id)
-            schema_entry.toc_data = bytes(target_entry.toc_data)
-            static_target_entries[target_id] = {
-                "entry": schema_entry,
-                "name": target_name,
-            }
-            log_message(
-                log,
-                f"STATIC UNIT target verified for {target_id} from {target_name}; "
-                "will preserve patch mesh/bone/GPU data and refresh only target LOD/schema.",
-            )
-
     # Keep a supplied archive as a per-Unit advanced fallback.  It must not
     # disable automatic migration for other Units in a mixed weapon/armor mod.
+    # Do not use it to guess zero-reference armor/helmet Units.
     if idswap_source_archives:
         for unit_entry in broken_patch.toc_dict.get(UnitID, {}).values():
             target_id = int(unit_entry.file_id)
-            if target_id in weapon_mapping_by_target or target_id in static_target_entries:
+            if target_id in weapon_mapping_by_target or is_static_unit(unit_entry):
                 continue
             match = match_unit_to_source_archives(
                 unit_entry,
@@ -2733,9 +2695,6 @@ def create_fixed_patch(
                 f"(score {matched_similarity.score}; {', '.join(matched_similarity.reasons)})",
             )
 
-    # Static patches used to be passed through completely because their source
-    # Unit cannot be inferred from zero references.  They are now handled by
-    # ``static_target_entries`` above, using the current target Unit instead.
     unit_passthrough_mode = False
     unit_header_only_mode = False
     full_passthrough_mode = False
@@ -2778,24 +2737,6 @@ def create_fixed_patch(
                 source_mapping = weapon_mapping_by_target[int(entry.file_id)]
                 new_entry = migrate_weapon_idswap_unit(entry, source_mapping.source_entry)
                 mode = "rigged-unit-idswap-surgical"
-            elif entry.type_id == UnitID and int(entry.file_id) in static_target_entries:
-                static_target = static_target_entries[int(entry.file_id)]
-                try:
-                    new_entry = migrate_static_unit_idswap_unit(
-                        entry,
-                        static_target["entry"],
-                    )
-                    mode = "static-unit-target-lod-surgical"
-                except Exception as exc:
-                    # The patch is more valuable intact than a guessed
-                    # normalization.  Leave unusual static Units untouched
-                    # and give the user a clear log entry instead.
-                    new_entry = entry.clone()
-                    mode = "static-unit-raw-fallback"
-                    log_message(
-                        log,
-                        f"STATIC UNIT migration failed for {entry.file_id} from {static_target['name']}: {exc}; preserving patch bytes.",
-                    )
             elif entry.type_id == UnitID and int(entry.file_id) in idswap_source_matches:
                 # Manual source selection is now surgical too.  Rebuilding a
                 # source Unit can overwrite custom armor/weapon transforms,
@@ -2814,7 +2755,11 @@ def create_fixed_patch(
                     log=log,
                     unit_header_only=unit_header_only_mode,
                     unit_passthrough=unit_passthrough_mode,
-                    refresh_unit_material_bindings=refresh_unit_material_bindings,
+                    # Only verified rigged same-ID Units use this targeted
+                    # material repair.  Armor/helmet retains the old path.
+                    refresh_unit_material_bindings=(
+                        refresh_unit_material_bindings and not is_static_unit(entry)
+                    ),
                 )
             if new_entry is None:
                 skipped_entries += 1
@@ -2892,14 +2837,6 @@ def create_fixed_patch(
                 "mode": "rigged-source",
             }
             for mapping in weapon_mappings
-        ] + [
-            {
-                "target_unit_id": target_id,
-                "source_unit_id": target_id,
-                "source_archive_path": source["name"],
-                "mode": "static-target",
-            }
-            for target_id, source in sorted(static_target_entries.items())
         ],
         # Kept for integrations written against the previous weapon-only
         # result shape.  New callers should use ``unit_idswap_mappings``.

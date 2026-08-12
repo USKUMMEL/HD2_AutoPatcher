@@ -161,13 +161,13 @@ class PatchFixerWindow(QMainWindow):
         layout.addLayout(grid)
         self.raw_fallback = QCheckBox("Preserve unknown or unsupported payloads when rebuilding")
         self.raw_fallback.setChecked(True)
-        self.weapon_swap_mode = QCheckBox("Safe automatic Unit ID Swap migration")
+        self.weapon_swap_mode = QCheckBox("Safe automatic Weapon ID Swap migration")
         self.weapon_swap_mode.setChecked(True)
         self.audio_migration = QCheckBox("Aggressive Audio migration — merge Wwise Banks into current game archives")
         layout.addWidget(self.raw_fallback)
         layout.addWidget(self.weapon_swap_mode)
         layout.addWidget(QLabel(
-            "Rigged weapon swaps preserve patch animation, bone, LOD, and GPU data. Static armor/helmet swaps refresh only the current target LOD and Unit schema.",
+            "Only verified rigged weapon swaps use this mode. Armor and helmet patches keep the original patch-tool repair path.",
             objectName="muted",
         ))
         layout.addWidget(self.audio_migration)

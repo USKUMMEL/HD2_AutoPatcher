@@ -164,7 +164,7 @@ class PatchFixerWindow(QMainWindow):
         header = QFrame(objectName="header"); header_row = QHBoxLayout(header); header_row.setContentsMargins(18, 10, 18, 10)
         brand = QLabel("HD2 PATCH FIXER"); brand.setStyleSheet("font-size: 16px; font-weight: 600;")
         self.status = QLabel("READY"); self.status.setStyleSheet("color: #9DA8A2; font-size: 10px; font-weight: 600;")
-        header_row.addWidget(brand); header_row.addWidget(QLabel("  |  Patch migration for Unit, Audio and Particle mods", objectName="muted")); header_row.addStretch(); header_row.addWidget(self.status); layout.addWidget(header)
+        header_row.addWidget(brand); header_row.addWidget(QLabel("  |  Version 0.1.0", objectName="muted")); header_row.addStretch(); header_row.addWidget(self.status); layout.addWidget(header)
         body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0); layout.addLayout(body)
         sidebar = QFrame(objectName="sidebar"); sidebar.setFixedWidth(212); side = QVBoxLayout(sidebar); side.setContentsMargins(14, 18, 14, 14); side.setSpacing(6)
         nav_label = QLabel("WORKSPACE", objectName="eyebrow"); side.addWidget(nav_label)
@@ -202,7 +202,7 @@ class PatchFixerWindow(QMainWindow):
         self.stack.addWidget(self.archive_page())
         main_layout.addWidget(self.stack)
         main_layout.addWidget(self.options_card())
-        lower = QHBoxLayout(); lower.setSpacing(12); lower.addWidget(self.log_card(), 1); actions = QVBoxLayout(); self.run_button = QPushButton("Run Migration", objectName="accent"); self.run_button.clicked.connect(self.run_fix); actions.addWidget(self.run_button); actions.addWidget(self.parallel_patches_card()); actions.addStretch(); lower.addLayout(actions); main_layout.addLayout(lower, 1)
+        lower = QHBoxLayout(); lower.setSpacing(12); lower.addWidget(self.log_card(), 1); actions = QVBoxLayout(); self.run_button = QPushButton("Run Patcher", objectName="accent"); self.run_button.clicked.connect(self.run_fix); actions.addWidget(self.run_button); actions.addWidget(self.parallel_patches_card()); actions.addStretch(); lower.addLayout(actions); main_layout.addLayout(lower, 1)
         self.set_mode(0)
         # The first layout pass can report an expanded page hint before Qt has
         # calculated the Browse rows. Refresh it once the window is shown.
@@ -433,7 +433,7 @@ class PatchFixerWindow(QMainWindow):
         row.addStretch()
         layout.addLayout(row)
         self.parallel_hint = QLabel(
-            f"Compressed Mods only · 1–{self.parallel_limit}. More jobs use more CPU, disk, and RAM.",
+            "How much patch it will fix at the same time, more number fix faster but also use more system resource but not much.",
             objectName="muted",
         )
         self.parallel_hint.setWordWrap(True)
@@ -453,7 +453,7 @@ class PatchFixerWindow(QMainWindow):
             self.parallel_plus.setEnabled(parallel_available and self.parallel_patch_count < self.parallel_limit)
             self.parallel_value.setEnabled(parallel_available)
             self.parallel_hint.setText(
-                f"Compressed Mods only · 1–{self.parallel_limit}. More jobs use more CPU, disk, and RAM."
+                "How much patch it will fix at the same time, more number fix faster but also use more system resource but not much."
                 if parallel_available
                 else "Single Patch processes one patch file at a time."
             )

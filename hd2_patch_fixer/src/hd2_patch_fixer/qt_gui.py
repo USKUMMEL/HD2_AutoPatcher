@@ -57,7 +57,7 @@ class WorkerSignals(QObject):
 
 
 class ArchiveSourcePicker(QDialog):
-    """Search the installed named-archive catalog and return one archive ID."""
+    """Search installed named archives and emit each selected archive ID."""
 
     catalog_loaded = Signal(object, str)
     archive_selected = Signal(str, str)
@@ -67,7 +67,6 @@ class ArchiveSourcePicker(QDialog):
         self.setWindowTitle("Choose ID Swap Source Archive")
         self.setModal(True)
         self.resize(720, 500)
-        self.selected_archive_id = None
         self._installed_ids = installed_archive_ids(game_data_folder)
         self._entries = []
 
@@ -133,9 +132,9 @@ class ArchiveSourcePicker(QDialog):
             self.status.setText("No installed archive matches this search.")
 
     def choose_archive(self, item):
-        self.selected_archive_id = item.data(Qt.UserRole)
+        archive_id = item.data(Qt.UserRole)
         display_name = item.data(Qt.UserRole + 1)
-        self.archive_selected.emit(self.selected_archive_id, display_name)
+        self.archive_selected.emit(archive_id, display_name)
         self.status.setText(f"Added: {display_name}. Click another archive or close this window.")
 
 
@@ -221,7 +220,9 @@ class PatchFixerWindow(QMainWindow):
         save_preferences(self.preferences)
 
     def card(self):
-        card = QFrame(objectName="card"); card.setContentsMargins(0, 0, 0, 0); return card
+        card = QFrame(objectName="card")
+        card.setContentsMargins(0, 0, 0, 0)
+        return card
 
     def path_field(self, parent_layout, label, browse):
         card = self.card()
@@ -229,20 +230,6 @@ class PatchFixerWindow(QMainWindow):
         # two input/output cards expanding vertically on the first show.
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.setSpacing(7); layout.addWidget(QLabel(label, objectName="eyebrow")); row = QHBoxLayout(); field = QLineEdit(); field.setPlaceholderText("Choose a folder or file…"); browse_button = QPushButton("Browse"); browse_button.clicked.connect(browse); row.addWidget(field, 1); row.addWidget(browse_button); layout.addLayout(row); parent_layout.addWidget(card); return field
-
-    def text_field(self, parent_layout, label, placeholder, hint=None):
-        card = self.card()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(7)
-        layout.addWidget(QLabel(label, objectName="eyebrow"))
-        field = QLineEdit()
-        field.setPlaceholderText(placeholder)
-        layout.addWidget(field)
-        if hint:
-            layout.addWidget(QLabel(hint, objectName="muted"))
-        parent_layout.addWidget(card)
-        return field
 
     def idswap_source_field(self, parent_layout, label, placeholder, hint=None):
         """Build a token editor for optional ID-swap source archives."""
@@ -339,7 +326,7 @@ class PatchFixerWindow(QMainWindow):
             label = QLabel(display_name)
             label.setToolTip(f"{display_name}\nArchive ID: {token}")
             chip_layout.addWidget(label)
-            remove = QPushButton("×", objectName="tokenRemove")
+            remove = QPushButton("x", objectName="tokenRemove")
             remove.setToolTip(f"Remove {display_name}")
             remove.clicked.connect(
                 lambda _checked=False, value=token: self.remove_idswap_source_token(value)
@@ -355,10 +342,26 @@ class PatchFixerWindow(QMainWindow):
         return ",".join(self.idswap_source_archive_ids) or None
 
     def single_page(self):
-        page = QWidget(); page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.patch_path = self.path_field(layout, "BROKEN PATCH FILE", self.browse_patch); self.export_path = self.path_field(layout, "EXPORT FOLDER", self.browse_export); layout.setAlignment(Qt.AlignTop); return page
+        page = QWidget()
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.patch_path = self.path_field(layout, "BROKEN PATCH FILE", self.browse_patch)
+        self.export_path = self.path_field(layout, "EXPORT FOLDER", self.browse_export)
+        layout.setAlignment(Qt.AlignTop)
+        return page
 
     def archive_page(self):
-        page = QWidget(); page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.mod_path = self.path_field(layout, "COMPRESSED MOD FILE", self.browse_mod); self.zip_path = self.path_field(layout, "EXPORT ZIP FILE", self.browse_zip); layout.setAlignment(Qt.AlignTop); return page
+        page = QWidget()
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.mod_path = self.path_field(layout, "COMPRESSED MOD FILE", self.browse_mod)
+        self.zip_path = self.path_field(layout, "EXPORT ZIP FILE", self.browse_zip)
+        layout.setAlignment(Qt.AlignTop)
+        return page
 
     def options_card(self):
         card = self.card()

@@ -158,49 +158,15 @@ def get_vertex_format_id(format_name: str, unit_version: int):
         )
     return format_id
 
-IDSWAP_PATCH_SECTION_OVERRIDES = (
-    "bone_info",
-    "stream_info",
-    "mesh_info",
-    "materials",
-    "customization_info",
-    "connecting_bone_hash",
-)
-
 # A source archive is an optional hint for true ID-swap geometry.  Weapon
 # patches also contain target-only scaffolding Units, so a weak resemblance is
 # not enough to safely borrow its LOD group from the source model.
 IDSWAP_SOURCE_MATCH_MIN_SCORE = 60
 
-# ``10800438`` is the Unit layout used by the current game build.  The
-# community updater's +4 vertex-format migration applies when crossing this
-# boundary; it is intentionally a byte-level schema migration, not a model
+# ``10800438`` is the current Unit layout. The community updater's +4
+# vertex-format migration is a byte-level schema migration, not a model
 # conversion.
-UNIT_IDSWAP_CURRENT_UNIT_VERSION = 0xA4CD36
-
-# Backwards-compatible internal alias.  The migration is now used for both
-# rigged weapon swaps and static armor/helmet swaps.
-WEAPON_IDSWAP_CURRENT_UNIT_VERSION = UNIT_IDSWAP_CURRENT_UNIT_VERSION
-
-# Unit header offsets which point to data after the LOD group.  Static
-# armor/helmet migration replaces the raw LOD group from the current target
-# Unit; when its size changes, only these real offsets are shifted.  Do not
-# update the neighbouring header-data fields just because they happen to look
-# like integers (the community script does that, but it can corrupt metadata).
-UNIT_SECTION_OFFSET_POSITIONS = (
-    0x34,  # transform_info
-    0x38,  # light_list
-    0x3C,  # pre_light_list
-    0x40,  # wwise_callback
-    0x4C,  # customization_info
-    0x50,  # unk_header_1
-    0x54,  # connecting_bone_hash
-    0x58,  # bone_info
-    0x5C,  # stream_info
-    0x60,  # ending offset
-    0x64,  # mesh_info
-    0x70,  # materials
-)
+WEAPON_IDSWAP_CURRENT_UNIT_VERSION = 0xA4CD36
 #endregion Module Helpers And Constants
 
 
@@ -283,16 +249,6 @@ class UnitFingerprint:
 class UnitSimilarity:
     score: int
     reasons: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ProbableIdSwap:
-    source_id: int
-    source_name: str
-    source_score: int
-    target_score: int
-    source_reasons: tuple[str, ...]
-    target_reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -851,7 +807,6 @@ class GameArchiveIndex:
         self.game_data_folder = game_data_folder
         self.search_archives = []
         self.archive_cache = {}
-        self.unit_fingerprint_cache = {}
 
     def build(self):
         if self.search_archives:
@@ -1437,11 +1392,8 @@ def migrate_weapon_idswap_unit(entry, source_entry):
 def is_static_unit(entry):
     """Whether a Unit has no external rig references.
 
-    Armor and helmet swaps created by the Community SDK are commonly static:
-    their Bone, Composite, and State Machine references are all zero.  They
-    need a different repair from weapon swaps: the current *target* Unit's
-    LOD group is authoritative, while all custom mesh/bone/GPU payload remains
-    owned by the patch.
+    This identifies static armor/helmet Units for the explicit, legacy source
+    archive path. It is not used for automatic ID-swap inference.
     """
     if entry.type_id != UnitID or len(entry.toc_data) < 48:
         return False
@@ -1451,81 +1403,6 @@ def is_static_unit(entry):
         or refs["composite_ref"]
         or refs["state_machine_ref"]
     )
-
-
-def _unit_lod_range(unit_data: bytes):
-    """Return the exact raw ``lod_group_list`` byte range in a Unit payload."""
-    if len(unit_data) < 0x38:
-        raise ValueError("Unit payload is too small for LOD migration.")
-    lod_start, next_section_start = struct.unpack_from("<II", unit_data, 0x30)
-    if (
-        lod_start < 0x80
-        or next_section_start < lod_start
-        or next_section_start > len(unit_data)
-    ):
-        raise ValueError("Unit has invalid LOD group offsets.")
-    return lod_start, next_section_start
-
-
-def migrate_static_unit_idswap_unit(entry, target_entry):
-    """Migrate a static armor/helmet Unit without a manual source archive.
-
-    The Community Unit Patcher resolves static armor and helmet Units by their
-    *target* file ID.  Reproduce that safe part of its update here: take the
-    current target's raw LOD group, update offsets if its size changed, and
-    apply the byte-level Unit schema conversion.  The patch's transforms,
-    customization, bone info, mesh info, materials, GPU data, and stream data
-    are never rebuilt or copied from the game.
-    """
-    if not is_static_unit(entry):
-        raise ValueError("Static Unit migration requires a zero-reference Unit entry.")
-    if target_entry.type_id != UnitID:
-        raise ValueError("Static Unit migration requires a current target Unit entry.")
-
-    # This validates the version transition and preserves every patch payload
-    # byte except the version and legacy vertex-format IDs.
-    migrated = migrate_weapon_idswap_unit(entry, target_entry)
-    patch_data = bytearray(migrated.toc_data)
-    target_data = bytes(target_entry.toc_data)
-    patch_lod_start, patch_lod_end = _unit_lod_range(patch_data)
-    target_lod_start, target_lod_end = _unit_lod_range(target_data)
-    target_lod = target_data[target_lod_start:target_lod_end]
-    size_difference = len(target_lod) - (patch_lod_end - patch_lod_start)
-
-    # A slice replacement deliberately keeps every trailing custom section in
-    # its original byte form.  Header offsets are adjusted afterwards instead
-    # of parsing/re-serializing the Unit.
-    patch_data[patch_lod_start:patch_lod_end] = target_lod
-    if size_difference:
-        for offset_position in UNIT_SECTION_OFFSET_POSITIONS:
-            if offset_position + 4 > len(patch_data):
-                raise ValueError("Static Unit has a truncated header offset table.")
-            section_offset = struct.unpack_from("<I", patch_data, offset_position)[0]
-            if section_offset >= patch_lod_end:
-                adjusted_offset = section_offset + size_difference
-                if adjusted_offset < 0 or adjusted_offset > len(patch_data):
-                    raise ValueError("Static Unit LOD update produced an invalid section offset.")
-                struct.pack_into("<I", patch_data, offset_position, adjusted_offset)
-
-    migrated.toc_data = bytes(patch_data)
-    return migrated
-
-
-def is_probable_static_idswap_patch(broken_patch: StreamToc):
-    units = list(broken_patch.toc_dict.get(UnitID, {}).values())
-    if len(units) < 2:
-        return False
-    for unit_entry in units:
-        refs = parse_unit_refs(unit_entry)
-        if refs["bones_ref"] != 0:
-            return False
-        if refs["composite_ref"] != 0:
-            return False
-        if refs["state_machine_ref"] != 0:
-            return False
-        if refs["header1"] != 4294967298:
-            return False
-    return True
 
 
 def resolve_unit_source_entry(
@@ -1677,17 +1554,6 @@ def score_unit_similarity(base: UnitFingerprint, candidate: UnitFingerprint):
     return UnitSimilarity(score=score, reasons=tuple(reasons))
 
 
-def get_cached_unit_fingerprint(entry, archive_index: GameArchiveIndex | None = None):
-    if archive_index is None:
-        return get_unit_fingerprint(entry)
-    cached = archive_index.unit_fingerprint_cache.get(int(entry.file_id))
-    if cached is not None:
-        return cached
-    fingerprint = get_unit_fingerprint(entry)
-    archive_index.unit_fingerprint_cache[int(entry.file_id)] = fingerprint
-    return fingerprint
-
-
 def resolve_archive_input_path(game_data_folder: str, archive_input: str):
     archive_input = archive_input.strip()
     if not archive_input:
@@ -1767,18 +1633,6 @@ def match_unit_to_source_archives(
     return best_match
 
 
-def detect_probable_id_swap(
-    entry,
-    default_archive: StreamToc,
-    archive_index: GameArchiveIndex | None = None,
-):
-    # Disabled for now.
-    #
-    # The first implementation scanned and loaded too much of the game data in order to
-    # score every Unit candidate, which is not safe to run by default on real user machines.
-    # We'll redesign this with a metadata-first approach before re-enabling automatic
-    # ID swap source inference.
-    return None
 #endregion Unit Analysis And ID Swap Matching
 
 
@@ -2116,11 +1970,6 @@ def normalize_unit_entry_from_source(
     header_only: bool = False,
     refresh_material_bindings: bool = False,
 ):
-    probable_id_swap = detect_probable_id_swap(
-        entry,
-        default_archive,
-        archive_index=archive_index,
-    )
     source_entry, source_name = resolve_unit_source_entry(
         entry.file_id,
         default_archive,
@@ -2139,28 +1988,6 @@ def normalize_unit_entry_from_source(
         log_message(
             log,
             f"Using header-only Unit normalization for {entry.file_id}: preserving mesh/lod/material ordering.",
-        )
-    elif probable_id_swap is not None:
-        log_message(
-            log,
-            "PROBABLE ID SWAP detected for "
-            f"{entry.file_id}: probable source {probable_id_swap.source_id} from "
-            f"{probable_id_swap.source_name} "
-            f"(score {probable_id_swap.source_score} vs target {probable_id_swap.target_score})",
-        )
-        if probable_id_swap.source_reasons:
-            log_message(
-                log,
-                f"ID swap source match reasons for {entry.file_id}: {', '.join(probable_id_swap.source_reasons)}",
-            )
-        if probable_id_swap.target_reasons:
-            log_message(
-                log,
-                f"Target match reasons for {entry.file_id}: {', '.join(probable_id_swap.target_reasons)}",
-            )
-        log_message(
-            log,
-            f"Using ID swap safe mode for {entry.file_id}: preserving patch geometry layout and skipping target LOD/mesh coercion.",
         )
     else:
         try:

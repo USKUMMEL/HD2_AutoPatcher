@@ -2043,12 +2043,78 @@ def repair_unit_lod_group_from_source(
     return True
 
 
+def repair_unit_material_bindings_from_source(
+    entry,
+    source_entry,
+    log=None,
+):
+    """Refresh vanilla material *references* without touching mod geometry.
+
+    Some same-ID Unit patches contain custom GPU/mesh data but no Material
+    entries of their own.  A game update can change the short material ID used
+    by a subset of an otherwise unchanged mesh list.  Keeping the old mapping
+    makes the Unit load with no renderable material, even though its mesh and
+    sidecars are intact.  This is deliberately strict: every mesh identity and
+    structural index must agree with the current Unit before its material IDs
+    and compact mapping table are refreshed.
+    """
+    source_unit = StingrayUnit()
+    source_unit.serialize(MemoryStream(source_entry.toc_data))
+    entry_unit = StingrayUnit()
+    entry_unit.serialize(MemoryStream(entry.toc_data))
+
+    source_meshes = extract_unit_mesh_sections(source_unit)
+    entry_meshes = extract_unit_mesh_sections(entry_unit)
+    source_materials = source_unit.section_blobs.get("materials", b"")
+    entry_materials = entry_unit.section_blobs.get("materials", b"")
+    if (
+        source_meshes is None
+        or entry_meshes is None
+        or len(source_materials) < 4
+        or len(entry_materials) < 4
+        or len(source_meshes.mesh_infos) != len(entry_meshes.mesh_infos)
+    ):
+        return False
+
+    for source_mesh, entry_mesh in zip(source_meshes.mesh_infos, entry_meshes.mesh_infos):
+        if (
+            source_mesh.mesh_id != entry_mesh.mesh_id
+            or source_mesh.lod_index != entry_mesh.lod_index
+            or source_mesh.stream_index != entry_mesh.stream_index
+            or source_mesh.transform_index != entry_mesh.transform_index
+            or len(source_mesh.material_ids) != len(entry_mesh.material_ids)
+        ):
+            return False
+
+    changed = False
+    for source_mesh, entry_mesh in zip(source_meshes.mesh_infos, entry_meshes.mesh_infos):
+        if source_mesh.material_ids != entry_mesh.material_ids:
+            entry_mesh.material_ids = list(source_mesh.material_ids)
+            changed = True
+
+    if not changed:
+        return False
+
+    # Replace only the compact SectionID -> MaterialID table.  The source mesh
+    # identities above prove every now-referenced SectionID belongs to the
+    # current vanilla Unit.  All other Unit sections and GPU/stream sidecars
+    # remain the patch's bytes.
+    entry_unit.section_blobs["mesh_info"] = entry_meshes.build()
+    entry_unit.section_blobs["materials"] = bytes(source_materials)
+    toc = MemoryStream(io_mode="write")
+    entry_unit.serialize(toc)
+    entry.toc_data = bytes(toc.data)
+    log_message(log, f"REFRESHED vanilla material bindings for Unit {entry.file_id}")
+    return True
+
+
 def normalize_unit_entry_from_source(
     entry,
     default_archive: StreamToc,
     archive_index: GameArchiveIndex | None = None,
     log=None,
     header_only: bool = False,
+    refresh_material_bindings: bool = False,
 ):
     probable_id_swap = detect_probable_id_swap(
         entry,
@@ -2109,6 +2175,15 @@ def normalize_unit_entry_from_source(
             repaired_layout = repair_unit_lod_group_from_source(entry, source_entry, log=log) or repaired_layout
         except Exception as exc:
             log_message(log, f"FAILED Unit LOD group repair for {entry.file_id}: {exc}")
+        if refresh_material_bindings:
+            try:
+                repaired_layout = repair_unit_material_bindings_from_source(
+                    entry,
+                    source_entry,
+                    log=log,
+                ) or repaired_layout
+            except Exception as exc:
+                log_message(log, f"FAILED Unit material-binding refresh for {entry.file_id}: {exc}")
 
     entry_unit = StingrayUnit()
     entry_unit.serialize(MemoryStream(entry.toc_data))
@@ -2216,6 +2291,7 @@ def build_entry_from_source(
     log=None,
     unit_header_only: bool = False,
     unit_passthrough: bool = False,
+    refresh_unit_material_bindings: bool = False,
 ):
     mode = "raw"
     if unit_passthrough and entry.type_id == UnitID:
@@ -2267,6 +2343,7 @@ def build_entry_from_source(
                     archive_index=archive_index,
                     log=log,
                     header_only=unit_header_only,
+                    refresh_material_bindings=refresh_unit_material_bindings,
                 )
     elif raw_fallback_for_unsupported:
         new_entry = entry.clone()
@@ -2278,6 +2355,7 @@ def build_entry_from_source(
                 archive_index=archive_index,
                 log=log,
                 header_only=unit_header_only,
+                refresh_material_bindings=refresh_unit_material_bindings,
             )
     else:
         return None, None
@@ -2503,6 +2581,12 @@ def create_fixed_patch(
     broken_patch = StreamToc()
     if not broken_patch.from_file(broken_patch_path):
         raise ValueError("Failed to load the selected broken patch.")
+
+    # If a patch ships Material resources, its material choices are authored
+    # content and must never be replaced by a vanilla lookup.  A patch with no
+    # Material entries can safely refresh only verified same-ID Unit bindings
+    # when the game moved a vanilla material SectionID between versions.
+    refresh_unit_material_bindings = not bool(broken_patch.toc_dict.get(MaterialID))
 
     idswap_source_archives = []
     idswap_source_matches = {}
@@ -2730,6 +2814,7 @@ def create_fixed_patch(
                     log=log,
                     unit_header_only=unit_header_only_mode,
                     unit_passthrough=unit_passthrough_mode,
+                    refresh_unit_material_bindings=refresh_unit_material_bindings,
                 )
             if new_entry is None:
                 skipped_entries += 1

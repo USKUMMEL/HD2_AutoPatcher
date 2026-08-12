@@ -82,7 +82,14 @@ class PatchFixerWindow(QMainWindow):
         self.single_nav.clicked.connect(lambda: self.set_mode(0))
         self.archive_nav.clicked.connect(lambda: self.set_mode(1))
         side.addWidget(self.single_nav); side.addWidget(self.archive_nav); side.addSpacing(18)
-        side.addWidget(QLabel("MIGRATION", objectName="eyebrow")); side.addWidget(QLabel("• Unit layouts & dependencies\n• Particle 0x6D–0x72 → 0x73\n• Wwise validation\n• Optional community audio merge", objectName="muted")); side.addStretch(); side.addWidget(QLabel("Select the game Data folder first.", objectName="muted")); body.addWidget(sidebar)
+        side.addWidget(QLabel("MIGRATION", objectName="eyebrow"))
+        thanks = QLabel(
+            "Thanks to Eve and Box, as well as everyone who contributed to the Helldivers 2 modding community.",
+            objectName="muted",
+        )
+        thanks.setWordWrap(True)
+        side.addWidget(thanks)
+        side.addStretch(); side.addWidget(QLabel("Select the game Data folder first.", objectName="muted")); body.addWidget(sidebar)
         main_scroll = QScrollArea()
         main_scroll.setWidgetResizable(True)
         main = QWidget()
@@ -97,7 +104,7 @@ class PatchFixerWindow(QMainWindow):
             main_layout,
             "ID SWAP SOURCE ARCHIVE(S) — OPTIONAL",
             "Enter an archive ID, then press Enter",
-            "Advanced fallback only when automatic Unit migration cannot verify a source. Add one or more base archive IDs as removable tokens.",
+            "Only using for id swap Armor/Helmet mods, if your mods patch doesnt have any id swap Armor/Helmet leave it blank. If so, enter the source archive, Example: You modded armor/helmet A then use ID swap it to armor/helmet B, so enter armor/helmet A source archive.",
         )
         self.stack = QStackedWidget()
         self.stack.addWidget(self.single_page())
@@ -157,7 +164,9 @@ class PatchFixerWindow(QMainWindow):
         self.idswap_token_host.setVisible(False)
         layout.addWidget(self.idswap_token_host)
         if hint:
-            layout.addWidget(QLabel(hint, objectName="muted"))
+            hint_label = QLabel(hint, objectName="muted")
+            hint_label.setWordWrap(True)
+            layout.addWidget(hint_label)
         parent_layout.addWidget(card)
         return field
 

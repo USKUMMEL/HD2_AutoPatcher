@@ -170,6 +170,12 @@ IDSWAP_PATCH_SECTION_OVERRIDES = (
 # patches also contain target-only scaffolding Units, so a weak resemblance is
 # not enough to safely borrow its LOD group from the source model.
 IDSWAP_SOURCE_MATCH_MIN_SCORE = 60
+
+# ``10800438`` is the Unit layout used by the current game build.  The
+# community updater's +4 vertex-format migration applies when crossing this
+# boundary; it is intentionally a byte-level schema migration, not a model
+# conversion.
+WEAPON_IDSWAP_CURRENT_UNIT_VERSION = 0xA4CD36
 #endregion Module Helpers And Constants
 
 
@@ -262,6 +268,17 @@ class ProbableIdSwap:
     target_score: int
     source_reasons: tuple[str, ...]
     target_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WeaponIdSwapMapping:
+    """One high-confidence source Unit inferred from a weapon patch Unit."""
+
+    target_unit_id: int
+    source_unit_id: int
+    source_entry: object
+    source_name: str
+    source_archive_path: str
 
 
 @dataclass
@@ -1203,6 +1220,195 @@ def parse_unit_refs(entry):
     }
 
 
+def weapon_unit_ref_signature(entry):
+    """Return the stable rig signature used to identify a swapped weapon.
+
+    The Community SDK creates an ID-swap by cloning a source Unit, changing
+    its file ID, and then writing custom mesh data.  The target file ID is
+    therefore not a useful way to find the source.  The Unit's Bone and State
+    Machine references survive that operation and provide a much stronger
+    identity than mesh/LOD similarity.
+    """
+    if entry.type_id != UnitID or len(entry.toc_data) < 48:
+        return None
+    refs = parse_unit_refs(entry)
+    if not refs["bones_ref"] or not refs["state_machine_ref"]:
+        return None
+    return (
+        int(refs["bones_ref"]),
+        int(refs["composite_ref"]),
+        int(refs["state_machine_ref"]),
+    )
+
+
+def _matching_weapon_source_units(source_archive, signature, target_unit_id):
+    return [
+        entry
+        for entry in source_archive.toc_dict.get(UnitID, {}).values()
+        if int(entry.file_id) != int(target_unit_id)
+        and weapon_unit_ref_signature(entry) == signature
+    ]
+
+
+def infer_weapon_idswap_mappings(patch, source):
+    """Infer only unambiguous weapon swap mappings.
+
+    ``source`` can be a loaded :class:`StreamToc` for a focused/manual lookup
+    or a :class:`GameArchiveIndex` for automatic discovery across the selected
+    game data folder.  A mapping is returned only when exactly one *different*
+    source Unit has the patch Unit's exact ``(Bones, Composite, StateMachine)``
+    signature.  Zero-reference helper Units and same-ID Units are deliberately
+    ignored; using fuzzy mesh matching for those was the source of unsafe
+    weapon repairs.
+    """
+    patch_units = list(patch.toc_dict.get(UnitID, {}).values())
+    target_signatures = {
+        int(entry.file_id): weapon_unit_ref_signature(entry)
+        for entry in patch_units
+    }
+    target_signatures = {
+        target_id: signature
+        for target_id, signature in target_signatures.items()
+        if signature is not None
+    }
+    if not target_signatures:
+        return []
+
+    if isinstance(source, StreamToc):
+        mappings = []
+        source_name = source.name or "source archive"
+        source_path = source.path or ""
+        for target_id, signature in target_signatures.items():
+            candidates = _matching_weapon_source_units(source, signature, target_id)
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                mappings.append(
+                    WeaponIdSwapMapping(
+                        target_unit_id=target_id,
+                        source_unit_id=int(candidate.file_id),
+                        source_entry=candidate,
+                        source_name=source_name,
+                        source_archive_path=source_path,
+                    )
+                )
+        return mappings
+
+    if not isinstance(source, GameArchiveIndex):
+        raise TypeError("Weapon ID-swap inference needs a StreamToc or GameArchiveIndex.")
+
+    # Index all requested Bone/StateMachine references in one TOC-header pass.
+    # This is substantially cheaper than a complete archive scan for every
+    # Unit in a multi-part weapon patch.
+    source.build()
+    requested_bones = {signature[0] for signature in target_signatures.values()}
+    requested_state_machines = {signature[2] for signature in target_signatures.values()}
+    bone_paths = {resource_id: set() for resource_id in requested_bones}
+    state_machine_paths = {resource_id: set() for resource_id in requested_state_machines}
+    for search_archive in source.search_archives:
+        available_bones = search_archive.toc_entries.get(BoneID, set())
+        available_state_machines = search_archive.toc_entries.get(StateMachineID, set())
+        for resource_id in requested_bones.intersection(available_bones):
+            bone_paths[resource_id].add(search_archive.path)
+        for resource_id in requested_state_machines.intersection(available_state_machines):
+            state_machine_paths[resource_id].add(search_archive.path)
+
+    mappings = []
+    for target_id, signature in target_signatures.items():
+        candidate_paths = sorted(
+            bone_paths[signature[0]].intersection(state_machine_paths[signature[2]])
+        )
+        candidates = []
+        for archive_path in candidate_paths:
+            archive = source.load_archive(archive_path)
+            if archive is None:
+                continue
+            for entry in _matching_weapon_source_units(archive, signature, target_id):
+                candidates.append((entry, archive_path))
+
+        # Multiple archive copies of an identical Unit can exist.  They are
+        # still safe when their source ID and payload are identical; otherwise
+        # leave the target unresolved instead of choosing arbitrarily.
+        by_source_id = {}
+        ambiguous = False
+        for entry, archive_path in candidates:
+            existing = by_source_id.get(int(entry.file_id))
+            if existing is None:
+                by_source_id[int(entry.file_id)] = (entry, archive_path)
+            elif bytes(existing[0].toc_data) != bytes(entry.toc_data):
+                ambiguous = True
+        if ambiguous or len(by_source_id) != 1:
+            continue
+        source_entry, source_path = next(iter(by_source_id.values()))
+        mappings.append(
+            WeaponIdSwapMapping(
+                target_unit_id=target_id,
+                source_unit_id=int(source_entry.file_id),
+                source_entry=source_entry,
+                source_name=f"game archive {Path(source_path).name}",
+                source_archive_path=str(source_path),
+            )
+        )
+    return mappings
+
+
+def migrate_weapon_idswap_unit(entry, source_entry):
+    """Apply the safe, surgical Unit schema update for a weapon ID swap.
+
+    No Unit section is parsed and reserialized.  In particular this preserves
+    the mod's custom transform/bone information, LOD data, materials, mesh
+    data, GPU payload, stream payload, and all external animation references.
+    Only the Unit version and the legacy stream-layout format IDs can change.
+    """
+    if entry.type_id != UnitID or source_entry.type_id != UnitID:
+        raise ValueError("Weapon ID-swap migration requires Unit entries.")
+    if len(entry.toc_data) < 0x60 or len(source_entry.toc_data) < 0x30:
+        raise ValueError("Unit payload is too small for weapon ID-swap migration.")
+
+    patch_data = bytearray(entry.toc_data)
+    source_data = bytes(source_entry.toc_data)
+    patch_version = struct.unpack_from("<I", patch_data, 0x2C)[0]
+    source_version = struct.unpack_from("<I", source_data, 0x2C)[0]
+
+    if patch_version != source_version and not (
+        patch_version < WEAPON_IDSWAP_CURRENT_UNIT_VERSION
+        and source_version == WEAPON_IDSWAP_CURRENT_UNIT_VERSION
+    ):
+        raise ValueError(
+            "Weapon Unit schema update is unknown for "
+            f"{patch_version} -> {source_version}; refusing to alter custom rig data."
+        )
+
+    if patch_version < WEAPON_IDSWAP_CURRENT_UNIT_VERSION:
+        layout_list_offset = struct.unpack_from("<I", patch_data, 0x5C)[0]
+        if layout_list_offset + 4 > len(patch_data):
+            raise ValueError("Weapon Unit has an invalid stream-layout offset.")
+        layout_count = struct.unpack_from("<I", patch_data, layout_list_offset)[0]
+        offsets_start = layout_list_offset + 4
+        if offsets_start + layout_count * 4 > len(patch_data):
+            raise ValueError("Weapon Unit has truncated stream-layout offsets.")
+        for layout_index in range(layout_count):
+            layout_offset = struct.unpack_from(
+                "<I", patch_data, offsets_start + layout_index * 4
+            )[0]
+            items_start = layout_list_offset + layout_offset + 8
+            if items_start + 16 * UnitVertexComponent.RECORD_SIZE > len(patch_data):
+                raise ValueError("Weapon Unit has truncated stream-layout items.")
+            for item_index in range(16):
+                format_offset = (
+                    items_start
+                    + item_index * UnitVertexComponent.RECORD_SIZE
+                    + 4
+                )
+                format_id = struct.unpack_from("<I", patch_data, format_offset)[0]
+                if format_id > 16:
+                    struct.pack_into("<I", patch_data, format_offset, format_id + 4)
+
+    struct.pack_into("<I", patch_data, 0x2C, source_version)
+    migrated = entry.clone()
+    migrated.toc_data = bytes(patch_data)
+    return migrated
+
+
 def is_probable_static_idswap_patch(broken_patch: StreamToc):
     units = list(broken_patch.toc_dict.get(UnitID, {}).values())
     if len(units) < 2:
@@ -2098,6 +2304,7 @@ def create_fixed_patch(
     raw_fallback_for_unsupported: bool = True,
     auto_include_unit_dependencies: bool = True,
     migrate_audio: bool = False,
+    weapon_swap_mode: bool = True,
     output_patch_path: str | None = None,
     idswap_source_archive: str | None = None,
     log=None,
@@ -2113,7 +2320,7 @@ def create_fixed_patch(
     slim_init(game_data_folder)
     archive_index = (
         GameArchiveIndex(game_data_folder)
-        if auto_include_unit_dependencies or migrate_audio
+        if auto_include_unit_dependencies or migrate_audio or weapon_swap_mode
         else None
     )
 
@@ -2129,7 +2336,6 @@ def create_fixed_patch(
         raise ValueError("Failed to load the selected broken patch.")
 
     idswap_source_archives = []
-    idswap_source_name = None
     idswap_source_matches = {}
     if idswap_source_archive:
         idswap_source_paths = resolve_archive_input_paths(game_data_folder, idswap_source_archive)
@@ -2155,7 +2361,52 @@ def create_fixed_patch(
                 }
             )
 
-        idswap_source_name = ", ".join(source_info["name"] for source_info in idswap_source_archives)
+    weapon_mappings = []
+    if weapon_swap_mode and archive_index is not None:
+        mapping_candidates = infer_weapon_idswap_mappings(broken_patch, archive_index)
+        # A manually supplied archive remains useful as an advanced hint when
+        # a mod references data which is not visible in the normal game index.
+        for source_info in idswap_source_archives:
+            mapping_candidates.extend(
+                infer_weapon_idswap_mappings(broken_patch, source_info["archive"])
+            )
+
+        candidates_by_target = {}
+        for mapping in mapping_candidates:
+            candidates_by_target.setdefault(mapping.target_unit_id, []).append(mapping)
+        for target_id, candidates in sorted(candidates_by_target.items()):
+            unique_sources = {
+                (candidate.source_unit_id, bytes(candidate.source_entry.toc_data))
+                for candidate in candidates
+            }
+            if len(unique_sources) != 1:
+                log_message(
+                    log,
+                    f"WEAPON IDSWAP ambiguous source for Unit {target_id}; leaving it out of automatic migration.",
+                )
+                continue
+            chosen = sorted(
+                candidates,
+                key=lambda candidate: (candidate.source_archive_path, candidate.source_unit_id),
+            )[0]
+            weapon_mappings.append(chosen)
+            log_message(
+                log,
+                f"WEAPON IDSWAP verified Unit {chosen.target_unit_id} -> {chosen.source_unit_id} "
+                f"from {chosen.source_name}; preserving patch rig, LOD, and GPU data.",
+            )
+
+    weapon_mapping_by_target = {
+        mapping.target_unit_id: mapping for mapping in weapon_mappings
+    }
+    weapon_reference_entry = (
+        weapon_mappings[0].source_entry if weapon_mappings else None
+    )
+
+    # Keep the legacy manual source-archive path for ordinary/armor Unit
+    # migrations.  It is intentionally not used once a verified weapon swap
+    # is found: fuzzy mesh matching is unsafe for a custom weapon rig.
+    if idswap_source_archives and (not weapon_swap_mode or not weapon_mappings):
         for unit_entry in broken_patch.toc_dict.get(UnitID, {}).values():
             match = match_unit_to_source_archives(
                 unit_entry,
@@ -2187,7 +2438,11 @@ def create_fixed_patch(
                 f"(score {matched_similarity.score}; {', '.join(matched_similarity.reasons)})",
             )
 
-    unit_passthrough_mode = bool(not idswap_source_archives and is_probable_static_idswap_patch(broken_patch))
+    unit_passthrough_mode = bool(
+        not weapon_mappings
+        and not idswap_source_archives
+        and is_probable_static_idswap_patch(broken_patch)
+    )
     unit_header_only_mode = False
     full_passthrough_mode = unit_passthrough_mode
     if unit_passthrough_mode:
@@ -2230,6 +2485,23 @@ def create_fixed_patch(
         for entry in entries.values():
             if full_passthrough_mode:
                 new_entry, mode = entry.clone(), "raw-preserve"
+            elif (
+                weapon_swap_mode
+                and weapon_reference_entry is not None
+                and entry.type_id == UnitID
+            ):
+                source_mapping = weapon_mapping_by_target.get(int(entry.file_id))
+                source_entry = (
+                    source_mapping.source_entry
+                    if source_mapping is not None
+                    else weapon_reference_entry
+                )
+                new_entry = migrate_weapon_idswap_unit(entry, source_entry)
+                mode = (
+                    "weapon-idswap-surgical"
+                    if source_mapping is not None
+                    else "weapon-unit-schema"
+                )
             elif entry.type_id == UnitID and int(entry.file_id) in idswap_source_matches:
                 new_entry, mode = rebuild_idswap_unit_from_source_archive(
                     entry,
@@ -2340,6 +2612,14 @@ def create_fixed_patch(
         "copied_counts": copied_counts,
         "source_counts": broken_patch.entry_counts(),
         "dependency_issues_resolved_or_seen": dependency_issues,
+        "weapon_idswap_mappings": [
+            {
+                "target_unit_id": mapping.target_unit_id,
+                "source_unit_id": mapping.source_unit_id,
+                "source_archive_path": mapping.source_archive_path,
+            }
+            for mapping in weapon_mappings
+        ],
     }
 
 
@@ -2352,6 +2632,7 @@ def create_fixed_mod_archive(
     raw_fallback_for_unsupported: bool = True,
     auto_include_unit_dependencies: bool = True,
     migrate_audio: bool = False,
+    weapon_swap_mode: bool = True,
     idswap_source_archive: str | None = None,
     log=None,
 ):
@@ -2391,6 +2672,7 @@ def create_fixed_mod_archive(
                 raw_fallback_for_unsupported=raw_fallback_for_unsupported,
                 auto_include_unit_dependencies=auto_include_unit_dependencies,
                 migrate_audio=migrate_audio,
+                weapon_swap_mode=weapon_swap_mode,
                 output_patch_path=patch_path,
                 idswap_source_archive=idswap_source_archive,
                 log=log,

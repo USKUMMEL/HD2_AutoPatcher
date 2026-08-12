@@ -9,9 +9,9 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QScrollArea, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .archive import create_fixed_mod_archive, create_fixed_patch, normalize_archive_selection
@@ -26,7 +26,8 @@ QFrame#header { border-width: 0 0 1px 0; } QFrame#sidebar { border-width: 0 1px 
 QFrame#card { border-radius: 6px; } QLabel { background: transparent; } QLabel#eyebrow { color: #9DA8A2; font-size: 10px; font-weight: 600; }
 QLabel#title { font-size: 23px; font-weight: 600; } QLabel#muted { color: #9DA8A2; }
 QLineEdit, QTextEdit { background: #171A1D; border: 1px solid #3B4449; border-radius: 4px; padding: 8px; selection-background-color: #7EAC90; selection-color: #102018; }
-QLineEdit:focus { border: 2px solid #86AFC0; } QPushButton { background: #292E33; border: 1px solid #3B4449; border-radius: 5px; padding: 8px 12px; color: #E4E9E5; font-weight: 500; }
+QLineEdit:focus { border: 2px solid #86AFC0; }
+QPushButton { background: #292E33; border: 1px solid #3B4449; border-radius: 5px; padding: 8px 12px; color: #E4E9E5; font-weight: 500; }
 QPushButton:hover { background: #31383D; } QPushButton:checked { background: #31383D; border-color: #7EAC90; } QPushButton#accent { background: #7EAC90; color: #102018; border-color: #9AC2A7; font-weight: 600; }
 QPushButton#accent:hover { background: #9AC2A7; } QPushButton:disabled { color: #66706A; background: #202428; }
 QCheckBox { spacing: 7px; color: #E4E9E5; background: transparent; } QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #526058; border-radius: 3px; background: #171A1D; }
@@ -71,8 +72,11 @@ class PatchFixerWindow(QMainWindow):
         body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0); layout.addLayout(body)
         sidebar = QFrame(objectName="sidebar"); sidebar.setFixedWidth(212); side = QVBoxLayout(sidebar); side.setContentsMargins(14, 18, 14, 14); side.setSpacing(6)
         nav_label = QLabel("WORKSPACE", objectName="eyebrow"); side.addWidget(nav_label)
-        self.single_nav = self.nav_button("Single Patch", True); self.archive_nav = self.nav_button("Compressed Mods")
-        self.single_nav.clicked.connect(lambda: self.set_mode(0)); self.archive_nav.clicked.connect(lambda: self.set_mode(1)); side.addWidget(self.single_nav); side.addWidget(self.archive_nav); side.addSpacing(18)
+        self.single_nav = self.nav_button("Single Patch", True)
+        self.archive_nav = self.nav_button("Compressed Mods")
+        self.single_nav.clicked.connect(lambda: self.set_mode(0))
+        self.archive_nav.clicked.connect(lambda: self.set_mode(1))
+        side.addWidget(self.single_nav); side.addWidget(self.archive_nav); side.addSpacing(18)
         side.addWidget(QLabel("MIGRATION", objectName="eyebrow")); side.addWidget(QLabel("• Unit layouts & dependencies\n• Particle 0x6D–0x72 → 0x73\n• Wwise validation\n• Optional community audio merge", objectName="muted")); side.addStretch(); side.addWidget(QLabel("Select the game Data folder first.", objectName="muted")); body.addWidget(sidebar)
         main_scroll = QScrollArea()
         main_scroll.setWidgetResizable(True)
@@ -88,11 +92,15 @@ class PatchFixerWindow(QMainWindow):
             main_layout,
             "ID SWAP SOURCE ARCHIVE(S) — OPTIONAL",
             "Example: 0A1B2C3D, 11223344",
-            "For Unit ID-swap patches only. Enter base archive ID(s), separated by commas.",
+            "Advanced fallback for manual/armor Unit swaps. Weapon swaps are detected automatically; enter base archive ID(s), separated by commas, only if needed.",
         )
-        self.stack = QStackedWidget(); self.stack.addWidget(self.single_page()); self.stack.addWidget(self.archive_page()); main_layout.addWidget(self.stack)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.single_page())
+        self.stack.addWidget(self.archive_page())
+        main_layout.addWidget(self.stack)
         main_layout.addWidget(self.options_card())
         lower = QHBoxLayout(); lower.setSpacing(12); lower.addWidget(self.log_card(), 1); actions = QVBoxLayout(); self.run_button = QPushButton("Run Migration", objectName="accent"); self.run_button.clicked.connect(self.run_fix); actions.addWidget(self.run_button); actions.addWidget(QLabel("Audio semantic merge is off by default.\nEnable it only for trusted audio mod baselines.", objectName="muted")); actions.addStretch(); lower.addLayout(actions); main_layout.addLayout(lower, 1)
+        self.set_mode(0)
 
     def nav_button(self, text, checked=False):
         button = QPushButton(text); button.setCheckable(True); button.setChecked(checked); return button
@@ -118,23 +126,67 @@ class PatchFixerWindow(QMainWindow):
         return field
 
     def single_page(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.patch_path = self.path_field(layout, "BROKEN PATCH FILE", self.browse_patch); self.export_path = self.path_field(layout, "EXPORT FOLDER", self.browse_export); return page
+        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.patch_path = self.path_field(layout, "BROKEN PATCH FILE", self.browse_patch); self.export_path = self.path_field(layout, "EXPORT FOLDER", self.browse_export); layout.addStretch(1); return page
 
     def archive_page(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.mod_path = self.path_field(layout, "COMPRESSED MOD FILE", self.browse_mod); self.zip_path = self.path_field(layout, "EXPORT ZIP FILE", self.browse_zip); return page
+        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10); self.mod_path = self.path_field(layout, "COMPRESSED MOD FILE", self.browse_mod); self.zip_path = self.path_field(layout, "EXPORT ZIP FILE", self.browse_zip); layout.addStretch(1); return page
 
     def options_card(self):
-        card = self.card(); layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.setSpacing(8); layout.addWidget(QLabel("DATA TYPES TO KEEP", objectName="eyebrow")); tools = QHBoxLayout(); select_all = QPushButton("Select all"); clear_all = QPushButton("Clear all"); select_all.clicked.connect(lambda: self.set_all_types(True)); clear_all.clicked.connect(lambda: self.set_all_types(False)); self.keep_unknown = QCheckBox("Keep unknown types"); self.keep_unknown.setChecked(True); tools.addWidget(select_all); tools.addWidget(clear_all); tools.addStretch(); tools.addWidget(self.keep_unknown); layout.addLayout(tools)
-        grid = QGridLayout(); grid.setHorizontalSpacing(20); grid.setVerticalSpacing(5)
+        card = self.card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("DATA TYPES TO KEEP", objectName="eyebrow"))
+        tools = QHBoxLayout()
+        select_all = QPushButton("Select all")
+        clear_all = QPushButton("Clear all")
+        select_all.clicked.connect(lambda: self.set_all_types(True))
+        clear_all.clicked.connect(lambda: self.set_all_types(False))
+        self.keep_unknown = QCheckBox("Keep unknown types")
+        self.keep_unknown.setChecked(True)
+        tools.addWidget(select_all)
+        tools.addWidget(clear_all)
+        tools.addStretch()
+        tools.addWidget(self.keep_unknown)
+        layout.addLayout(tools)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(5)
         for index, (type_id, label) in enumerate(TYPE_LABELS):
-            check = QCheckBox(label); check.setChecked(True); self.type_checks[type_id] = check; grid.addWidget(check, index % 3, index // 3)
-        layout.addLayout(grid); self.raw_fallback = QCheckBox("Preserve unknown or unsupported payloads when rebuilding"); self.raw_fallback.setChecked(True); self.audio_migration = QCheckBox("Aggressive Audio migration — merge Wwise Banks into current game archives"); layout.addWidget(self.raw_fallback); layout.addWidget(self.audio_migration); layout.addWidget(QLabel("The audio option uses the community audio engine. A patch made on an old game build can reapply old vanilla WEM data.", objectName="muted")); return card
+            check = QCheckBox(label)
+            check.setChecked(True)
+            self.type_checks[type_id] = check
+            grid.addWidget(check, index % 3, index // 3)
+        layout.addLayout(grid)
+        self.raw_fallback = QCheckBox("Preserve unknown or unsupported payloads when rebuilding")
+        self.raw_fallback.setChecked(True)
+        self.weapon_swap_mode = QCheckBox("Safe automatic Weapon ID Swap detection and migration")
+        self.weapon_swap_mode.setChecked(True)
+        self.audio_migration = QCheckBox("Aggressive Audio migration — merge Wwise Banks into current game archives")
+        layout.addWidget(self.raw_fallback)
+        layout.addWidget(self.weapon_swap_mode)
+        layout.addWidget(QLabel(
+            "Detects strong source references automatically and preserves patch animation, bone, and GPU data.",
+            objectName="muted",
+        ))
+        layout.addWidget(self.audio_migration)
+        layout.addWidget(QLabel(
+            "The audio option uses the community audio engine. A patch made on an old game build can reapply old vanilla WEM data.",
+            objectName="muted",
+        ))
+        return card
 
     def log_card(self):
         card = self.card(); layout = QVBoxLayout(card); layout.setContentsMargins(14, 12, 14, 14); layout.addWidget(QLabel("MIGRATION LOG", objectName="eyebrow")); self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setPlainText("Ready. Choose a game folder and mod patch."); layout.addWidget(self.log); return card
 
     def set_mode(self, mode):
-        self.stack.setCurrentIndex(mode); self.single_nav.setChecked(mode == 0); self.archive_nav.setChecked(mode == 1)
+        self.stack.setCurrentIndex(mode)
+        # Keep the current input page compact instead of reserving unused space.
+        self.stack.setFixedHeight(self.stack.currentWidget().sizeHint().height())
+        self.single_nav.setChecked(mode == 0)
+        self.archive_nav.setChecked(mode == 1)
+        self.run_button.setEnabled(True)
+        self.status.setText("READY")
 
     def set_all_types(self, checked):
         for check in self.type_checks.values(): check.setChecked(checked)
@@ -175,11 +227,12 @@ class PatchFixerWindow(QMainWindow):
         keep_unknown = self.keep_unknown.isChecked()
         raw_fallback = self.raw_fallback.isChecked()
         migrate_audio = self.audio_migration.isChecked()
+        weapon_swap_mode = self.weapon_swap_mode.isChecked()
         idswap_source_archive = self.idswap_source_archive.text().strip() or None
         self.run_button.setEnabled(False); self.status.setText("MIGRATING"); self.append_log("Starting patch migration…")
         def worker():
             try:
-                args = dict(game_data_folder=game, keep_type_ids=keep, keep_unknown_types=keep_unknown, raw_fallback_for_unsupported=raw_fallback, migrate_audio=migrate_audio, idswap_source_archive=idswap_source_archive, log=lambda text: self.signals.log.emit(text))
+                args = dict(game_data_folder=game, keep_type_ids=keep, keep_unknown_types=keep_unknown, raw_fallback_for_unsupported=raw_fallback, migrate_audio=migrate_audio, weapon_swap_mode=weapon_swap_mode, idswap_source_archive=idswap_source_archive, log=lambda text: self.signals.log.emit(text))
                 result = create_fixed_mod_archive(input_archive_path=source, output_zip_path=target, **args) if archive_mode else create_fixed_patch(broken_patch_path=source, export_dir=target, **args)
                 result["archive_mode"] = archive_mode; self.signals.complete.emit(result)
             except Exception as exc: self.signals.failed.emit(str(exc))

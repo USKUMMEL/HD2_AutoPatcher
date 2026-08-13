@@ -58,7 +58,9 @@ def decompress_dsar(file_path):
 
     bundle.seek(8)
     num_chunks = read_int(bundle) # num data chunks
-    data = []
+    # Avoid a list of all decompressed chunks plus a second join buffer for
+    # one resource.  The patcher only needs the final resource bytes.
+    data = bytearray()
     file_count = 0
 
     for i in range(num_chunks):
@@ -76,11 +78,11 @@ def decompress_dsar(file_path):
         temp_data = bundle.read(compressed_size)
         if compression_type == COMPRESSED:
             temp_data = block.decompress(temp_data, uncompressed_size=uncompressed_size)
-        data.append(temp_data)
+        data.extend(temp_data)
 
     bundle.close()
 
-    return b"".join(data)
+    return bytes(data)
 
 def get_resource_from_bundle(bundle_path: str, resource_file_offset: int):
 
@@ -90,7 +92,7 @@ def get_resource_from_bundle(bundle_path: str, resource_file_offset: int):
     bundle = open(bundle_path, 'rb')
     bundle.seek(8)
     num_chunks = read_int(bundle) # num data chunks
-    data = []
+    data = bytearray()
     
     global bundle_offsets
     chunk_num = bundle_offsets[os.path.basename(bundle_path)][resource_file_offset]
@@ -101,18 +103,18 @@ def get_resource_from_bundle(bundle_path: str, resource_file_offset: int):
 
         if chunk_type & START and len(data) > 0:
             bundle.close()
-            return b"".join(data)
+            return bytes(data)
 
         # read and decompress data
         bundle.seek(compressed_offset)
         temp_data = bundle.read(compressed_size)
         if compression_type == COMPRESSED:
             temp_data = block.decompress(temp_data, uncompressed_size=uncompressed_size)
-        data.append(temp_data)
+        data.extend(temp_data)
 
         if chunk_num == num_chunks - 1:
             bundle.close()
-            return b"".join(data)
+            return bytes(data)
             
         chunk_num += 1
 
@@ -186,7 +188,7 @@ def init_bundle_mapping():
                 package_contents[name].size = bundle_size
                 package_contents[name].entries = [bundle_entry]
 
-def get_resources_from_bundle(bundle_path: str, start_offset: int, size: int):
+def iter_resources_from_bundle(bundle_path: str, start_offset: int, size: int):
 
 
 
@@ -194,13 +196,15 @@ def get_resources_from_bundle(bundle_path: str, start_offset: int, size: int):
     # handles resources split into multiple compressed chunks to return complete resource
 
     current_size = 0
-    resources = []
-
     while current_size < size:
         resource = get_resource_from_bundle(bundle_path, start_offset + current_size)
+        if not resource:
+            raise ValueError("Bundle resource has zero length")
+        remaining_size = size - current_size
+        if len(resource) > remaining_size:
+            resource = resource[:remaining_size]
         current_size += len(resource)
-        resources.append(resource)
-    return resources
+        yield resource
     
 def get_package_toc(package_name: str):
     global package_contents
@@ -320,9 +324,12 @@ def reconstruct_package_from_bundles(package_name: str):
         except IndexError:
             item_size = package.size - item.original_archive_offset
         size += item_size
-        resources = get_resources_from_bundle(os.path.join(game_data_folder, f"bundles.{item.bundle_index:02d}.nxa"), item.start_offset, item_size)
-        combined_data = b"".join(resources)
-        package_data[item.original_archive_offset:item.original_archive_offset+len(combined_data)] = combined_data
+        write_offset = item.original_archive_offset
+        bundle_path = os.path.join(game_data_folder, f"bundles.{item.bundle_index:02d}.nxa")
+        for resource in iter_resources_from_bundle(bundle_path, item.start_offset, item_size):
+            end_offset = write_offset + len(resource)
+            package_data[write_offset:end_offset] = resource
+            write_offset = end_offset
     return package_data
 
 if __name__ == "__main__":

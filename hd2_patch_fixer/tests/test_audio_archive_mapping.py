@@ -20,6 +20,7 @@ from hd2_patch_fixer.archive import (
     map_patch_wwise_banks_to_game_archives,
 )
 from hd2_patch_fixer.constants import WwiseBankID, WwiseDepID, WwiseStreamID
+from hd2_patch_fixer.community_audio_adapter import CommunityAudioAdapterError
 
 
 ARCHIVE_MAGIC = 4026531857
@@ -188,6 +189,38 @@ class AudioArchiveMappingTests(unittest.TestCase):
         self.assertEqual(entries[(WwiseBankID, bank_id)].toc_data, b"new-bank")
         self.assertEqual(entries[(WwiseDepID, bank_id)].toc_data, b"new-dep")
         self.assertEqual(entries[(WwiseStreamID, stream_id)].stream_data, b"new-wem")
+
+    def test_mapped_audio_failure_does_not_silently_export_raw_audio(self):
+        bank_id = 909
+        patch_archive = StreamToc()
+        bank = TocEntry()
+        bank.file_id = bank_id
+        bank.type_id = WwiseBankID
+        bank.toc_data = b"old-bank"
+        patch_archive.add_entry(bank)
+
+        with (
+            patch.object(
+                archive_module,
+                "map_patch_wwise_banks_to_game_archives",
+                return_value={bank_id: ("current_game_archive",)},
+            ),
+            patch.object(
+                archive_module,
+                "migrate_audio_patch_with_community_engine",
+                side_effect=CommunityAudioAdapterError("synthetic merge failure"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                CommunityAudioAdapterError,
+                "unfixed audio cannot be exported",
+            ):
+                migrate_patch_audio_from_current_game_archives(
+                    game_data_folder="unused",
+                    broken_patch_path="original.patch_0",
+                    broken_patch=patch_archive,
+                    archive_index=GameArchiveIndex("unused"),
+                )
 
 
 if __name__ == "__main__":

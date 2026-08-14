@@ -1051,19 +1051,22 @@ def migrate_patch_audio_from_current_game_archives(
                 log=log,
             )
         except CommunityAudioAdapterError as exc:
-            log_message(
-                log,
-                f"COMMUNITY AUDIO: Semantic migration failed; preserving original audio. {exc}",
-            )
-            return {}
+            # Raw-preserving a Bank that was successfully mapped to a current
+            # archive creates a deceptively successful patch with unfixed
+            # audio. Audio migration is always enabled in the UI, so fail
+            # clearly and preserve the user's original input instead.
+            raise CommunityAudioAdapterError(
+                "Community audio migration failed after matching the current game Bank. "
+                "No output patch was written, so unfixed audio cannot be exported. "
+                f"Details: {exc}"
+            ) from exc
 
         migrated_patch = StreamToc()
         if not migrated_patch.from_file(str(result.output_path)):
-            log_message(
-                log,
-                "COMMUNITY AUDIO: Generated patch could not be read; preserving original audio.",
+            raise CommunityAudioAdapterError(
+                "Community audio migration generated an unreadable patch. "
+                "No output patch was written, so unfixed audio cannot be exported."
             )
-            return {}
 
         migrated_entries = {}
         for type_id in AUDIO_TYPE_IDS:

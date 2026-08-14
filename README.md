@@ -2,6 +2,8 @@
 
 HD2 AutoPatcher updates Helldivers 2 mod patches after game updates.
 
+The combination of known patcher tools from the Helldivers 2 modding community.
+
 It supports Unit, Particle, and Wwise audio patch data.
 
 ## How to use

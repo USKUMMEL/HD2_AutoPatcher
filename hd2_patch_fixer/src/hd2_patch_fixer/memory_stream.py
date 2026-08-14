@@ -43,6 +43,8 @@ class MemoryStream:
 
     def write(self, raw_bytes):
         length = len(raw_bytes)
+        if self.location > len(self.data):
+            self.data.extend(b"\x00" * (self.location - len(self.data)))
         self.data[self.location:self.location + length] = raw_bytes
         self.location += length
 

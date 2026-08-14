@@ -610,13 +610,16 @@ class TocEntry:
         self.entry_index = toc_file.uint32(index)
         return self
 
-    def serialize_data(self, toc_file: MemoryStream, gpu_file: MemoryStream, stream_file: MemoryStream):
+    def serialize_data(self, toc_file: MemoryStream, gpu_file: MemoryStream, stream_file: MemoryStream, load_payloads=True):
         if toc_file.is_reading():
             toc_file.seek(self.toc_data_offset)
             self.toc_data = bytearray(self.toc_data_size)
         else:
             self.toc_data_offset = toc_file.tell()
         self.toc_data = toc_file.bytes(self.toc_data)
+
+        if not load_payloads and gpu_file.is_reading():
+            return
 
         if gpu_file.is_writing():
             self.gpu_resource_offset = ceil(float(gpu_file.tell()) / 64) * 64
@@ -700,10 +703,9 @@ class StreamToc:
                     entry.serialize(self.toc_file, index)
                     index += 1
 
-        if serialize_data:
-            for entries in self.toc_dict.values():
-                for entry in entries.values():
-                    entry.serialize_data(self.toc_file, self.gpu_file, self.stream_file)
+        for entries in self.toc_dict.values():
+            for entry in entries.values():
+                entry.serialize_data(self.toc_file, self.gpu_file, self.stream_file, load_payloads=serialize_data)
 
         if self.toc_file.is_writing():
             self.toc_file.seek(toc_entry_start)
@@ -716,7 +718,7 @@ class StreamToc:
 
     def from_file(self, path, serialize_data=True):
         self.update_path(path)
-        toc_data, gpu_data, stream_data = load_package(path)
+        toc_data, gpu_data, stream_data = load_package(path, load_payloads=serialize_data)
         self.toc_file = MemoryStream(toc_data)
         self.gpu_file = MemoryStream(gpu_data)
         self.stream_file = MemoryStream(stream_data)
@@ -726,10 +728,9 @@ class StreamToc:
         # memory use for a Slim archive, where a reconstructed stream sidecar
         # can be hundreds of megabytes.  No caller needs these read buffers
         # after parsing; ``to_file`` creates fresh write buffers later.
-        if serialize_data:
-            self.toc_file = MemoryStream()
-            self.gpu_file = MemoryStream()
-            self.stream_file = MemoryStream()
+        self.toc_file = MemoryStream()
+        self.gpu_file = MemoryStream()
+        self.stream_file = MemoryStream()
         return parsed
 
     def to_file(self, path=None):
@@ -745,11 +746,11 @@ class StreamToc:
             self.toc_file.data.extend(bytearray(min_size - len(self.toc_file.data)))
 
         with open(path, "w+b") as file_obj:
-            file_obj.write(bytes(self.toc_file.data))
+            file_obj.write(self.toc_file.data)
         with open(path + ".gpu_resources", "w+b") as file_obj:
-            file_obj.write(bytes(self.gpu_file.data))
+            file_obj.write(self.gpu_file.data)
         with open(path + ".stream", "w+b") as file_obj:
-            file_obj.write(bytes(self.stream_file.data))
+            file_obj.write(self.stream_file.data)
 
     def get_entry(self, file_id, type_id):
         return self.toc_dict.get(int(type_id), {}).get(int(file_id))
@@ -911,7 +912,7 @@ class GameArchiveIndex:
 
         return self.find_archive_paths(bank_ids, WwiseBankID)
 
-    def load_archive(self, archive_path: str):
+    def load_archive(self, archive_path: str, serialize_data=True):
         """Load one archive for an immediate lookup without retaining it.
 
         A cached ``StreamToc`` owns all entries from its source archive,
@@ -921,7 +922,7 @@ class GameArchiveIndex:
         the full archive is released as soon as the lookup completes.
         """
         archive = StreamToc()
-        if not archive.from_file(str(archive_path)):
+        if not archive.from_file(str(archive_path), serialize_data=serialize_data):
             return None
         return archive
 
@@ -944,7 +945,7 @@ class GameArchiveIndex:
             archive_path = self.find_archive_path(file_id, UnitID)
             if archive_path is None:
                 return None, None
-            archive = self.load_archive(archive_path)
+            archive = self.load_archive(archive_path, serialize_data=False)
             if archive is None:
                 return None, None
             entry = archive.get_entry(file_id, UnitID)
@@ -1208,37 +1209,37 @@ def rebuild_entry_payload(entry):
         gpu = MemoryStream(io_mode="write")
         stream = MemoryStream(io_mode="write")
         asset.serialize(toc, gpu, stream)
-        return bytes(toc.data), bytes(gpu.data), bytes(stream.data), "rebuilt"
+        return toc.data, gpu.data, stream.data, "rebuilt"
 
     if entry.type_id == MaterialID:
         asset = StingrayMaterial()
         asset.serialize(MemoryStream(entry.toc_data))
         toc = MemoryStream(io_mode="write")
         asset.serialize(toc)
-        return bytes(toc.data), bytes(entry.gpu_data), b"", "rebuilt"
+        return toc.data, entry.gpu_data, b"", "rebuilt"
 
     if entry.type_id == BoneID:
         asset = StingrayBones()
         asset.serialize(MemoryStream(entry.toc_data))
         toc = MemoryStream(entry.toc_data, io_mode="write")
         asset.serialize(toc)
-        return bytes(toc.data), b"", b"", "rebuilt"
+        return toc.data, b"", b"", "rebuilt"
 
     if entry.type_id == ParticleID:
         # Particle effects need a version-aware migration.  Preserve their
         # stream/GPU data byte-for-byte; the community updater only changes
         # the effect payload stored in the package TOC.
         toc_data, mode = migrate_particle_effect(entry.toc_data)
-        return toc_data, bytes(entry.gpu_data), bytes(entry.stream_data), mode
+        return toc_data, entry.gpu_data, entry.stream_data, mode
 
     if entry.type_id == StateMachineID:
         asset = StingrayStateMachine()
         asset.serialize(MemoryStream(entry.toc_data))
         toc = MemoryStream(io_mode="write")
         asset.serialize(toc)
-        return bytes(toc.data), b"", b"", "rebuilt"
+        return toc.data, b"", b"", "rebuilt"
 
-    return bytes(entry.toc_data), bytes(entry.gpu_data), bytes(entry.stream_data), "raw"
+    return entry.toc_data, entry.gpu_data, entry.stream_data, "raw"
 #endregion Archive And Package Utilities
 
 
@@ -1360,7 +1361,7 @@ def infer_weapon_idswap_mappings(patch, source):
         )
         candidates = []
         for archive_path in candidate_paths:
-            archive = source.load_archive(archive_path)
+            archive = source.load_archive(archive_path, serialize_data=False)
             if archive is None:
                 continue
             for entry in _matching_weapon_source_units(archive, signature, target_id):
@@ -1904,15 +1905,6 @@ def repair_unit_mesh_order_from_source(
     reordered_infos = []
     for source_mesh in source_meshes.mesh_infos:
         entry_mesh = copy.deepcopy(entry_by_id[source_mesh.mesh_id])
-        if (
-            entry_mesh.transform_index != source_mesh.transform_index
-            or entry_mesh.stream_index != source_mesh.stream_index
-            or entry_mesh.lod_index != source_mesh.lod_index
-        ):
-            changed = True
-        entry_mesh.transform_index = source_mesh.transform_index
-        entry_mesh.stream_index = source_mesh.stream_index
-        entry_mesh.lod_index = source_mesh.lod_index
         reordered_infos.append(entry_mesh)
 
     if [mesh.mesh_id for mesh in entry_meshes.mesh_infos] != source_ids:

@@ -4,11 +4,11 @@ import struct
 class MemoryStream:
     def __init__(self, data=b"", io_mode="read"):
         self.location = 0
-        self.data = bytearray(data)
+        self.data = data if isinstance(data, bytearray) else bytearray(data)
         self.reading = io_mode == "read"
 
     def open(self, data, io_mode="read"):
-        self.data = bytearray(data)
+        self.data = data if isinstance(data, bytearray) else bytearray(data)
         self.location = 0
         self.reading = io_mode == "read"
 

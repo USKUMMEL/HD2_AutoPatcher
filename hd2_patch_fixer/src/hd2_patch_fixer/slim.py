@@ -77,7 +77,7 @@ def decompress_dsar(file_path):
                     uncompressed_size=uncompressed_size,
                 )
             data.extend(temp_data)
-    return bytes(data)
+    return data
 
 
 def get_resource_from_bundle(bundle_path: str, resource_file_offset: int):
@@ -105,7 +105,7 @@ def get_resource_from_bundle(bundle_path: str, resource_file_offset: int):
             ) = values
 
             if chunk_type & START and data:
-                return bytes(data)
+                return data
 
             bundle.seek(compressed_offset)
             temp_data = bundle.read(compressed_size)
@@ -117,7 +117,7 @@ def get_resource_from_bundle(bundle_path: str, resource_file_offset: int):
             data.extend(temp_data)
 
             if chunk_num == num_chunks - 1:
-                return bytes(data)
+                return data
 
             chunk_num += 1
 
@@ -249,7 +249,7 @@ def get_package_toc(package_name: str):
         return package_file.read(72 + num_types * 32 + num_files * 80)
 
 
-def load_package(package_path: str):
+def load_package(package_path: str, load_payloads: bool = True):
     if not os.path.dirname(package_path):
         package_path = os.path.join(game_data_folder, package_path)
 
@@ -268,30 +268,33 @@ def load_package(package_path: str):
         content = reconstruct_package_from_bundles(package_path)
         if content:
             toc_data = content
-        content = reconstruct_package_from_bundles(f"{package_path}.gpu_resources")
-        if content:
-            gpu_data = content
-        content = reconstruct_package_from_bundles(f"{package_path}.stream")
-        if content:
-            stream_data = content
+        if load_payloads:
+            content = reconstruct_package_from_bundles(f"{package_path}.gpu_resources")
+            if content:
+                gpu_data = content
+            content = reconstruct_package_from_bundles(f"{package_path}.stream")
+            if content:
+                stream_data = content
     elif package_type == DSAR:
         toc_data = decompress_dsar(package_path)
-        gpu_path = package_path + ".gpu_resources"
-        stream_path = package_path + ".stream"
-        if os.path.exists(gpu_path):
-            gpu_data = decompress_dsar(gpu_path)
-        if os.path.exists(stream_path):
-            stream_data = decompress_dsar(stream_path)
+        if load_payloads:
+            gpu_path = package_path + ".gpu_resources"
+            stream_path = package_path + ".stream"
+            if os.path.exists(gpu_path):
+                gpu_data = decompress_dsar(gpu_path)
+            if os.path.exists(stream_path):
+                stream_data = decompress_dsar(stream_path)
     else:
         with open(package_path, "rb") as file_obj:
-            toc_data = file_obj.read()
-        gpu_path = package_path + ".gpu_resources"
-        stream_path = package_path + ".stream"
-        if os.path.exists(gpu_path):
-            with open(gpu_path, "rb") as file_obj:
-                gpu_data = file_obj.read()
-        if os.path.exists(stream_path):
-            with open(stream_path, "rb") as file_obj:
-                stream_data = file_obj.read()
+            toc_data = bytearray(file_obj.read())
+        if load_payloads:
+            gpu_path = package_path + ".gpu_resources"
+            stream_path = package_path + ".stream"
+            if os.path.exists(gpu_path):
+                with open(gpu_path, "rb") as file_obj:
+                    gpu_data = bytearray(file_obj.read())
+            if os.path.exists(stream_path):
+                with open(stream_path, "rb") as file_obj:
+                    stream_data = bytearray(file_obj.read())
 
     return toc_data, gpu_data, stream_data
